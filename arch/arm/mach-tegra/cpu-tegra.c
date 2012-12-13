@@ -46,8 +46,23 @@
 
 /* tegra throttling and edp governors require frequencies in the table
    to be in ascending order */
+#ifdef CONFIG_P999_OC
+static struct cpufreq_frequency_table P999_OC[] = {
+	{ 0, 216000 },
+	{ 1, 312000 },
+	{ 2, 456000 },
+	{ 3, 608000 },
+	{ 4, 760000 },
+	{ 5, 816000 },
+	{ 6, 912000 },
+	{ 7, 1000000 },
+	{ 8, 1200000 },
+	{ 9, CPUFREQ_TABLE_END },
+};
+static struct cpufreq_frequency_table *freq_table=P999_OC;
+#else
 static struct cpufreq_frequency_table *freq_table;
-
+#endif
 static struct clk *cpu_clk;
 static struct clk *emc_clk;
 

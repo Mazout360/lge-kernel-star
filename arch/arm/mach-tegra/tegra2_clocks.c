@@ -410,7 +410,11 @@ static struct clk tegra2_clk_twd = {
 		 atomic context which cannot take a mutex. */
 	.name     = "twd",
 	.ops      = &tegra2_twd_ops,
+	#ifdef CONFIG_P999_OC	
+	.max_rate = 1200000000,	/* Same as tegra_clk_virtual_cpu.max_rate */
+	#else
 	.max_rate = 1000000000,	/* Same as tegra_clk_virtual_cpu.max_rate */
+	#endif
 	.mul      = 1,
 	.div      = 4,
 };
@@ -2012,7 +2016,11 @@ static struct clk tegra_pll_x = {
 	.ops       = &tegra_pll_ops,
 	.reg       = 0xe0,
 	.parent    = &tegra_clk_m,
-	.max_rate  = 1000000000,
+	#ifdef CONFIG_P999_OC	
+	.max_rate = 1200000000,	
+	#else
+	.max_rate = 1000000000,
+	#endif
 	.u.pll = {
 		.input_min = 2000000,
 		.input_max = 31000000,
@@ -2036,7 +2044,11 @@ static struct clk tegra_pll_e = {
 	.ops       = &tegra_plle_ops,
 	.parent    = &tegra_clk_m,
 	.reg       = 0xe8,
-	.max_rate  = 100000000,
+	#ifdef CONFIG_P999_OC	
+	.max_rate = 1200000000,	
+	#else
+	.max_rate = 1000000000,	
+	#endif
 	.u.pll = {
 		.input_min = 12000000,
 		.input_max = 12000000,
@@ -2158,7 +2170,11 @@ static struct clk tegra_clk_cclk = {
 	.inputs	= mux_cclk,
 	.reg	= 0x20,
 	.ops	= &tegra_super_ops,
-	.max_rate = 1000000000,
+	#ifdef CONFIG_P999_OC	
+	.max_rate = 1200000000,
+	#else
+	.max_rate = 1000000000,	
+	#endif
 };
 
 static struct clk tegra_clk_sclk = {
@@ -2174,7 +2190,11 @@ static struct clk tegra_clk_virtual_cpu = {
 	.name      = "cpu",
 	.parent    = &tegra_clk_cclk,
 	.ops       = &tegra_cpu_ops,
-	.max_rate  = 1000000000,
+	#ifdef CONFIG_P999_OC	
+	.max_rate = 1200000000,	
+	#else
+	.max_rate = 1000000000,	
+	#endif
 	.u.cpu = {
 		.main      = &tegra_pll_x,
 		.backup    = &tegra_pll_p,
@@ -2637,7 +2657,11 @@ static void tegra2_init_sku_limits(void)
 					       __func__, limit->clk_name);
 					continue;
 				}
-				c->max_rate = limit->max_rate;
+			#ifdef CONFIG_P999_OC
+			c->max_rate = 1200000000;
+			#else
+			c->max_rate = 1000000000;
+			#endif
 			}
 		}
 	}
@@ -2659,6 +2683,23 @@ static void tegra2_init_one_clock(struct clk *c)
  * Frequency table index must be sequential starting at 0 and frequencies
  * must be ascending.
  */
+#ifdef CONFIG_P999_OC
+static struct cpufreq_frequency_table freq_table_456MHz[] = {
+	{ 0, 216000 },
+	{ 1, 312000 },
+	{ 2, 456000 },
+	{ 3, CPUFREQ_TABLE_END },
+};
+ 
+
+static struct cpufreq_frequency_table freq_table_608MHz[] = {
+	{ 0, 216000 },
+	{ 1, 312000 },
+	{ 2, 456000 },
+	{ 3, 608000 },
+	{ 4, CPUFREQ_TABLE_END },
+};
+#endif
 
 static struct cpufreq_frequency_table freq_table_750MHz[] = {
 	{ 0, 216000 },
@@ -2693,12 +2734,21 @@ static struct cpufreq_frequency_table freq_table_1p2GHz[] = {
 	{ 8, 1200000 },
 	{ 9, CPUFREQ_TABLE_END },
 };
-
+#ifdef CONFIG_P999_OC
+static struct tegra_cpufreq_table_data cpufreq_tables[] = {
+	{ freq_table_456MHz, 1, 2, 2 },	
+	{ freq_table_608MHz, 1, 3, 2 },
+	{ freq_table_750MHz, 1, 4, 3 },
+	{ freq_table_1p0GHz, 2, 6, 5 },
+	{ freq_table_1p2GHz, 2, 7, 6 },
+};
+#else
 static struct tegra_cpufreq_table_data cpufreq_tables[] = {
 	{ freq_table_750MHz, 1, 4 },
 	{ freq_table_1p0GHz, 2, 6 },
 	{ freq_table_1p2GHz, 2, 7 },
 };
+#endif
 
 struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void)
 {
