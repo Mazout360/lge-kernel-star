@@ -23,7 +23,7 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/module.h>
-
+#include <linux/memcopy.h>
 #ifndef __HAVE_ARCH_STRNICMP
 /**
  * strnicmp - Case insensitive, length-limited string comparison
@@ -567,11 +567,10 @@ EXPORT_SYMBOL(memset);
  */
 void *memcpy(void *dest, const void *src, size_t count)
 {
-	char *tmp = dest;
-	const char *s = src;
+	unsigned long dstp = (unsigned long)dest; 
+	unsigned long srcp = (unsigned long)src; 
 
-	while (count--)
-		*tmp++ = *s++;
+	mem_copy_fwd(dstp, srcp, count); 
 	return dest;
 }
 EXPORT_SYMBOL(memcpy);
@@ -588,21 +587,12 @@ EXPORT_SYMBOL(memcpy);
  */
 void *memmove(void *dest, const void *src, size_t count)
 {
-	char *tmp;
-	const char *s;
-
-	if (dest <= src) {
-		tmp = dest;
-		s = src;
-		while (count--)
-			*tmp++ = *s++;
+unsigned long dstp = (unsigned long)dest; 
+	unsigned long srcp = (unsigned long)src; 
+	if (dest - src >= count) { 
+		mem_copy_fwd(dstp, srcp, count); 
 	} else {
-		tmp = dest;
-		tmp += count;
-		s = src;
-		s += count;
-		while (count--)
-			*--tmp = *--s;
+		mem_copy_bwd(dstp, srcp, count); 
 	}
 	return dest;
 }
