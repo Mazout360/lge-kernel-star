@@ -432,8 +432,26 @@ static void __init tegra_star_init(void)
 #if defined(CONFIG_MACH_STAR)
 	star_muic_init();
 #endif
-}
+#define RAM_RESERVED_SIZE 100*1024
+	/* Force the reserved_buffer to be at its old (Froyo/GB) location
+	   for reboot to work with the older bootloader */
+if (strstr(saved_command_line, "brdrev=")) {
+		extern void *reserved_buffer;
 
+		pr_info("The older bootloader detected\n");
+		if (memblock_end_of_DRAM() > 0x17f80000) {
+			if (memblock_reserve(0x17f80000, RAM_RESERVED_SIZE)) {
+				pr_err("Fail to get reserved_buffer for the older bootloader\n");
+			} else {
+				pr_info("Change reserved_buffer for the older bootloader\n");
+				reserved_buffer = phys_to_virt(0x17f80000);
+			}
+		} else {
+			pr_info("Change reserved_buffer\n");
+			reserved_buffer = ioremap(0x17f80000, RAM_RESERVED_SIZE);
+		}
+	}
+}
 int __init tegra_star_protected_aperture_init(void)
 {
 	tegra_protected_aperture_init(tegra_grhost_aperture);
