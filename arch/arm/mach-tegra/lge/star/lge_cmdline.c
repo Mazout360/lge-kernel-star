@@ -38,6 +38,8 @@ static struct cmdline_parameter cmdline_parameters[] __initdata = {
     {"tegra_fbmem", "1548288@0x1fe86000", 1},
 #endif
     {"androidboot.hardware", "star", 1},
+    {"androidboot.serialno", "123456789ABCDEF", 1},
+
 };
 
 static char *matchstr(const char *s1, const char *s2, int getvalue)

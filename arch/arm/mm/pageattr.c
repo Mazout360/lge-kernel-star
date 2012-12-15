@@ -329,6 +329,7 @@ static void __set_pmd_pte(pmd_t *pmd, unsigned long address, pte_t *pte)
 	struct page *page;
 
 	cpa_debug("__set_pmd_pte %x %x %x\n", pmd, pte, *pte);
+    dsb();
 
 	/* change init_mm */
 	pmd_populate_kernel(&init_mm, pmd, pte);
@@ -341,7 +342,7 @@ static void __set_pmd_pte(pmd_t *pmd, unsigned long address, pte_t *pte)
 			pgd_index(address), address);
 		pmd_populate_kernel(NULL, pmd, pte);
 	}
-
+    dsb();
 }
 
 static int

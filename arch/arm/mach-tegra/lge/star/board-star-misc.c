@@ -69,7 +69,7 @@ static int __init tegra_hw_rev_setup(char *line)
 	return 1;
 }
 
-__setup("hw_rev=", tegra_hw_rev_setup);
+__setup("brdrev=", tegra_hw_rev_setup);
 
 #if defined( CONFIG_STAR_VIBRATOR)
 #include <mach/vibrator.h>

@@ -45,28 +45,29 @@
 int lge_nvdata_raw_read(int offset, char* buf, int size)
 {
 	if(size == 0) return 0;
-
+    
 	int h_file = 0;
 	int ret = 0;
 	mm_segment_t oldfs = get_fs();
 	set_fs(KERNEL_DS);
 	h_file = sys_open(LGE_NVDATA_PARTITION, O_RDWR,0);
-
+    
 	if(h_file >= 0)
 	{
-		printk("read NV size = %d, offset = %d\n",size, offset);	
+		printk("read NV size = %d, offset = %d\n",size, offset);
 		sys_lseek( h_file, offset, 0 );
-
+        
 		ret = sys_read( h_file, buf, size);
-		
-		printk("read NV ret = %d\n",ret);	
-		
+        
+		printk("read NV ret = %d\n",ret);
+        
 		if( ret != size )
 		{
 			printk("Can't read  NVDATA.\n");
+			set_fs(oldfs);
 			return ret;
 		}
-
+        
 		sys_close(h_file);
 	}
 	else
@@ -76,10 +77,10 @@ int lge_nvdata_raw_read(int offset, char* buf, int size)
 	}
 	set_fs(oldfs);
 	if (size > 1)
-	       printk("read NV offset = %d, message = %s(%x)[%d]\n", offset, buf, *buf, *buf);
-	else	
+        printk("read NV offset = %d, message = %s(%x)[%d]\n", offset, buf, *buf, *buf);
+	else
        	printk("read NV offset = %d, message = %x[%d]\n", offset, *buf, *buf);
-	   
+    
 	return size;
 }
 
@@ -87,29 +88,31 @@ int lge_nvdata_raw_write(int offset, char* buf, int size)
 
 {
 	if(size == 0) return 0;
-
+    
 	int h_file = 0;
 	int ret = 0;
-
+    
 	mm_segment_t oldfs = get_fs();
 	set_fs(KERNEL_DS);
 	h_file = sys_open(LGE_NVDATA_PARTITION, O_RDWR,0);
-
+    
 	if(h_file >= 0)
 	{
-		printk("write NV size = %d, offset = %d\n",size, offset);	
+		printk("write NV size = %d, offset = %d\n",size, offset);
 		sys_lseek( h_file, offset, 0 );
-
+        
 		ret = sys_write( h_file, buf, size);
-		
-		printk("write NV ret = %d\n",ret);	
-		
+        
+		printk("write NV ret = %d\n",ret);
+        
 		if( ret != size )
 		{
 			printk("Can't write  NVDATA.\n");
+			set_fs(oldfs);
+			sys_sync();
 			return ret;
 		}
-
+        
 		sys_close(h_file);
 	}
 	else
@@ -118,14 +121,14 @@ int lge_nvdata_raw_write(int offset, char* buf, int size)
 		return 0;
 	}
 	set_fs(oldfs);
-
+    
 	sys_sync();
-	
+    
 	if (size > 1)
        	printk("write NV offset = %d, message = %s(%x)[%d]\n", offset, buf, *buf, *buf);
 	else
-	       printk("write NV offset = %d, message = %x[%d]\n", offset, *buf, *buf);
-	   
+        printk("write NV offset = %d, message = %x[%d]\n", offset, *buf, *buf);
+    
 	return size;
 }
 
