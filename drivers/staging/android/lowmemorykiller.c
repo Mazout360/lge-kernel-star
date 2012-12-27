@@ -34,7 +34,9 @@
 #include <linux/mm.h>
 #include <linux/oom.h>
 #include <linux/sched.h>
+#ifdef CONFIG_GLIBC_MEMCPY
 #include <linux/compaction.h>
+#endif
 #include <linux/notifier.h>
 #include <linux/fs.h>
 #include <linux/swap.h>
@@ -57,7 +59,9 @@ static int lowmem_minfree_size = 4;
 
 static struct task_struct *lowmem_deathpending;
 static unsigned long lowmem_deathpending_timeout;
+#ifdef CONFIG_GLIBC_MEMCPY
 extern int compact_nodes(bool sync);
+#endif
 #define lowmem_print(level, x...)			\
 	do {						\
 		if (lowmem_debug_level >= (level))	\
@@ -182,8 +186,10 @@ static int lowmem_shrink(struct shrinker *s, int nr_to_scan, gfp_t gfp_mask)
 	lowmem_print(4, "lowmem_shrink %d, %x, return %d\n",
 		     nr_to_scan, gfp_mask, rem);
 	read_unlock(&tasklist_lock);
+#ifdef CONFIG_GLIBC_MEMCPY
 	if (selected)
 	compact_nodes(false);
+#endif
 	return rem;
 }
 

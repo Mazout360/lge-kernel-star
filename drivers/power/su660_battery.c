@@ -186,7 +186,9 @@ struct battery_info {
 	int				temperature;
 	int				capacity;
 	int				health;
+#ifdef CONFIG_P999_BATTERYFIX
     int             fixed_capacity;//Mazout360: Pass calculate_capacity in this integer
+#endif
 
 
 	int				prev_charge_type;
@@ -344,7 +346,9 @@ static void battery_update(struct battery_info *batt_info)
 	batt_info->temperature		= battery_read_temperature();			// Read Temperature
 	batt_info->capacity 		= battery_read_capacity();			// Read Capacity
 	batt_info->present		= battery_check_present();			// Set Battery Present
+#ifdef CONFIG_P999_BATTERYFIX
     star_capacity_from_voltage_via_calculate(); //Mazout360: Recalculate the capacity from voltage during battery update
+#endif
 	//temp resize
 	
 	if(batt_info->temperature < 0 )
@@ -1102,7 +1106,11 @@ else //TEMP_CONTROL_ON
 #endif // TRICKLE_RECHECK
 
 		/* Gauge Follower Function Called */
-		if( /*(batt_info->gauge_on == 1) && */(batt_info->capacity != batt_info->capacity_gauge) )
+#ifdef CONFIG_P999_BATTERYFIX
+		if( (batt_info->capacity != batt_info->capacity_gauge) )
+#else
+        if( (batt_info->gauge_on == 1) && (batt_info->capacity != batt_info->capacity_gauge) )
+#endif
 			star_gauge_follower_func();
 
 		/* Changes Polling Period */
@@ -1305,18 +1313,24 @@ static int battery_get_property(struct power_supply *psy,
 
 	switch (psp) {
 		case POWER_SUPPLY_PROP_STATUS:
-			//if (batt_info->gauge_on == 0) // Not yet receive CBC from CP
-			//{
-			//	val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
-				//			DBG("[Warning] Cannot receive CBC from CP until now, Display Battery loading Icon!!");
-			//}
-//			else if (batt_info->present == 0)
-//			{
-//				val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
-				//			DBG("BATTERY_STATUS_NO_BATTERY(%d)", val->intval);
-//			}
-			if ((batt_info->health == POWER_SUPPLY_HEALTH_CRITICAL_OVERHEAT)
+#ifndef CONFIG_P999_BATTERYFIX
+			if (batt_info->gauge_on == 0) // Not yet receive CBC from CP
+			{
+				val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+							DBG("[Warning] Cannot receive CBC from CP until now, Display Battery loading Icon!!");
+			}
+			else if (batt_info->present == 0)
+			{
+				val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+						DBG("BATTERY_STATUS_NO_BATTERY(%d)", val->intval);
+			}
+
+			else if ((batt_info->health == POWER_SUPPLY_HEALTH_CRITICAL_OVERHEAT)
 					|| (batt_info->health == POWER_SUPPLY_HEALTH_COLD))
+#else
+            if ((batt_info->health == POWER_SUPPLY_HEALTH_CRITICAL_OVERHEAT)
+					|| (batt_info->health == POWER_SUPPLY_HEALTH_COLD))
+#endif
 			{
 					  if(charger_ic_get_status() != CHARGER_DISABLE)
 					  {
@@ -1451,10 +1465,14 @@ static int battery_get_property(struct power_supply *psy,
 			break;
 
 		case POWER_SUPPLY_PROP_CAPACITY:
-			//if (batt_info->gauge_on == 1)
+#ifdef CONFIG_P999_BATTERYFIX
             val->intval = batt_info->fixed_capacity; //Mazout360: Bypass gauge detection and directly send fixed_capacity to OS.
-			//else
-			//	val->intval = 999;
+#else
+            if (batt_info->gauge_on == 1)
+                val->intval = batt_info->capacity;
+			else
+				val->intval = 999;
+#endif
 			break;
 
 		case POWER_SUPPLY_PROP_TEMP:
@@ -1815,7 +1833,9 @@ static void star_capacity_from_voltage_via_calculate(void)
 
 		DBG("with Charger Batt CAP [%d] / Calc CAP [%d]", batt_info->capacity, calculate_capacity);
 		batt_info->capacity_voltage = calculate_capacity;
+#ifdef CONFIG_P999_BATTERYFIX
         batt_info->fixed_capacity = calculate_capacity; //Mazout360: pass calculated capacity to fixed_capacity
+#endif
 	}
 	else if ( (charger_ic_get_status() == CHARGER_DISABLE) 
 			|| (charger_ic_get_state() == CHARGER_STATE_FULLBATTERY) )
@@ -1850,7 +1870,9 @@ static void star_capacity_from_voltage_via_calculate(void)
 
 		DBG("Without Charger Batt CAP [%d] / Calc CAP [%d]", batt_info->capacity, calculate_capacity);
 		batt_info->capacity_voltage = calculate_capacity;
+#ifdef CONFIG_P999_BATTERYFIX
         batt_info->fixed_capacity = calculate_capacity;
+#endif
 	}
 }
 static void star_gauge_follower_func(void)

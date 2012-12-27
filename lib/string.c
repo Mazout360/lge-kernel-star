@@ -23,7 +23,9 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/module.h>
+#ifdef CONFIG_GLIBC_MEMCPY
 #include <linux/memcopy.h>
+#endif
 #ifndef __HAVE_ARCH_STRNICMP
 /**
  * strnicmp - Case insensitive, length-limited string comparison
@@ -567,10 +569,17 @@ EXPORT_SYMBOL(memset);
  */
 void *memcpy(void *dest, const void *src, size_t count)
 {
-	unsigned long dstp = (unsigned long)dest; 
+#ifdef CONFIG_GLIBC_MEMCPY
+	unsigned long dstp = (unsigned long)dest;
 	unsigned long srcp = (unsigned long)src; 
 
-	mem_copy_fwd(dstp, srcp, count); 
+	mem_copy_fwd(dstp, srcp, count);
+#else
+    char *tmp = dest;
+    const char *s = src;
+    while (count--)
+        *tmp++ = *s++;
+#endif
 	return dest;
 }
 EXPORT_SYMBOL(memcpy);
@@ -587,12 +596,32 @@ EXPORT_SYMBOL(memcpy);
  */
 void *memmove(void *dest, const void *src, size_t count)
 {
-unsigned long dstp = (unsigned long)dest; 
+#ifdef CONFIG_GLIBC_MEMCPY
+unsigned long dstp = (unsigned long)dest;
 	unsigned long srcp = (unsigned long)src; 
 	if (dest - src >= count) { 
-		mem_copy_fwd(dstp, srcp, count); 
+		mem_copy_fwd(dstp, srcp, count);
+#else
+    char *tmp;
+    const char *s;
+    
+    if (dest <= src) {
+        tmp = dest;
+        s = src;
+        while (count--)
+            *tmp++ = *s++;
+#endif
 	} else {
-		mem_copy_bwd(dstp, srcp, count); 
+#ifdef CONFIG_GLIBC_MEMCPY
+		mem_copy_bwd(dstp, srcp, count);
+#else
+    tmp = dest;
+        tmp += count;
+        s = src;
+        s += count;
+        while (count--)
+            *--tmp = *--s;
+#endif
 	}
 	return dest;
 }

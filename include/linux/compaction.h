@@ -84,10 +84,12 @@ static inline bool compaction_deferred(struct zone *zone)
 	return 1;
 }
 
+#ifdef CONFIG_GLIBC_MEMCPY
 static inline int compact_nodes(bool sync)
 {
 	return COMPACT_CONTINUE;
 }
+#endif /* CONFIG_GLIBC_MEMCPY */
 #endif /* CONFIG_COMPACTION */
 
 #if defined(CONFIG_COMPACTION) && defined(CONFIG_SYSFS) && defined(CONFIG_NUMA)

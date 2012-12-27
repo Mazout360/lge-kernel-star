@@ -677,7 +677,11 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 
 
 /* Compact all zones within a node */
+#ifdef CONFIG_GLIBC_MEMCPY
 static int compact_node(int nid, bool sync)
+#else
+static int compact_node(int nid)
+#endif
 {
 	int zoneid;
 	pg_data_t *pgdat;
@@ -695,7 +699,9 @@ static int compact_node(int nid, bool sync)
 			.nr_freepages = 0,
 			.nr_migratepages = 0,
 			.order = -1,
+#ifdef CONFIG_GLIBC_MEMCPY
 			.sync = sync,
+#endif
 		};
 
 		zone = &pgdat->node_zones[zoneid];
@@ -716,13 +722,21 @@ static int compact_node(int nid, bool sync)
 }
 
 /* Compact all nodes in the system */
+#ifdef CONFIG_GLIBC_MEMCPY
 int compact_nodes(bool sync)
+#else
+static int compact_nodes(void)
+#endif
 {
 	int nid;
 
 	for_each_online_node(nid)
+#ifdef CONFIG_GLIBC_MEMCPY
 		compact_node(nid, sync);
-
+#else
+    compact_node(nid);
+#endif
+    
 	return COMPACT_COMPLETE;
 }
 
@@ -734,7 +748,11 @@ int sysctl_compaction_handler(struct ctl_table *table, int write,
 			void __user *buffer, size_t *length, loff_t *ppos)
 {
 	if (write)
+#ifdef CONFIG_GLIBC_MEMCPY
 		return compact_nodes(true);
+#else
+        return compact_nodes();
+#endif
 
 	return 0;
 }

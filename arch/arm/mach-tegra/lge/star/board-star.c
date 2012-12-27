@@ -432,6 +432,7 @@ static void __init tegra_star_init(void)
 #if defined(CONFIG_MACH_STAR)
 	star_muic_init();
 #endif
+#ifdef CONFIG_P999_BOOTFIX
 #define RAM_RESERVED_SIZE 100*1024
 	/* Force the reserved_buffer to be at its old (Froyo/GB) location
 	   for reboot to work with the older bootloader */
@@ -451,6 +452,7 @@ if (strstr(saved_command_line, "brdrev=")) {
 			reserved_buffer = ioremap(0x17f80000, RAM_RESERVED_SIZE);
 		}
 	}
+#endif
 }
 int __init tegra_star_protected_aperture_init(void)
 {
