@@ -272,4 +272,10 @@ config AVERAGE
 
 	  If unsure, say N.
 
+config GLIBC_MEMCPY
+	bool "Use GLIBC memcpy.c and compcache"
+	default y
+	help
+		Enable GLIBC memcpy.
+
 endmenu

@@ -263,3 +263,9 @@ config TEGRA_BPC_MGMT
 	help
 	  This driver reduces cpu frequency/voltage on gpio event from the
 	  battery current monitor device.
+
+config P999_BATTERYFIX
+	bool "P999 temporary battery meter fix"
+	default y
+	help
+		Enable capacity readings while not charging on the P999.

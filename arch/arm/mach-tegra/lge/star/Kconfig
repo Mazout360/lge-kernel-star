@@ -178,4 +178,15 @@ config PANICRPT
 	help
 	  If you want to enable kernel panic dump tool , then say Y
 
+config P999_BOOTFIX
+	bool "P999 Fixed boot and memory allocation"
+	default y
+	help
+		Enable booting on the older GB bootloader.
+
+config SERIALNO_OVERRIDE
+	bool "Override detected android serial number"
+	default y
+	help
+		Override serial no for correct ADB detection on some OSes.
 #endmenu
