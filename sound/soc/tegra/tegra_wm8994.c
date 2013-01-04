@@ -916,8 +916,8 @@ static const struct snd_soc_dapm_route tegra_wm8994_audio_map[] = {
 	{ "IN1LN", NULL, "MICBIAS1" },
 
 	/* sub mic is connected to IN1RN */
-	{"MICBIAS2", NULL, "Line Jack"},
-	{"IN1RN", NULL, "MICBIAS2" },		
+	{"MICBIAS1", NULL, "Mic Jack"},
+	{"IN1RN", NULL, "MICBIAS1" },
 
 };
 
@@ -1029,7 +1029,7 @@ static int tegra_wm8994_init(struct snd_soc_pcm_runtime *rtd)
 		}
 		machine->gpio_requested |= GPIO_HP_MUTE;
 
-		gpio_direction_output(pdata->gpio_hp_mute, 0);
+		gpio_direction_output(pdata->gpio_hp_mute, 1);
 	}
 
 	if (gpio_is_valid(pdata->gpio_int_mic_en)) {

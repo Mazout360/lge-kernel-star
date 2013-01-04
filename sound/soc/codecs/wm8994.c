@@ -1672,10 +1672,6 @@ SND_SOC_DAPM_MIXER("DAC1L Mixer", SND_SOC_NOPM, 0, 0,
 SND_SOC_DAPM_MIXER("DAC1R Mixer", SND_SOC_NOPM, 0, 0,
 		   dac1r_mix, ARRAY_SIZE(dac1r_mix)),
 
-SND_SOC_DAPM_AIF_OUT("AIF2ADCL", NULL, 0,
-		     WM8994_POWER_MANAGEMENT_4, 13, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2ADCR", NULL, 0,
-		     WM8994_POWER_MANAGEMENT_4, 12, 0),
 //                                                          
 #if defined (CONFIG_MACH_STAR) || defined (CONFIG_MACH_BSSQ)
 //                                                 
@@ -1689,6 +1685,10 @@ SND_SOC_DAPM_AIF_IN("AIF2DACL", NULL, 0,
 SND_SOC_DAPM_AIF_IN("AIF2DACR", NULL, 0,
 		    WM8994_POWER_MANAGEMENT_5, 12, 0),
 #else
+SND_SOC_DAPM_AIF_OUT("AIF2ADCL", NULL, 0,
+                         WM8994_POWER_MANAGEMENT_4, 13, 0),
+SND_SOC_DAPM_AIF_OUT("AIF2ADCR", NULL, 0,
+                         WM8994_POWER_MANAGEMENT_4, 12, 0),
 SND_SOC_DAPM_AIF_IN_E("AIF2DACL", NULL, 0,
 		      WM8994_POWER_MANAGEMENT_5, 13, 0, wm8958_aif_ev,
 		      SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
@@ -1707,7 +1707,7 @@ SND_SOC_DAPM_MUX("AIF2DAC Mux", SND_SOC_NOPM, 0, 0, &aif2dac_mux),
 SND_SOC_DAPM_MUX("AIF2ADC Mux", SND_SOC_NOPM, 0, 0, &aif2adc_mux),
 
 SND_SOC_DAPM_AIF_IN("AIF3DACDAT", "AIF3 Playback", 0, SND_SOC_NOPM, 0, 0),
-SND_SOC_DAPM_AIF_IN("AIF3ADCDAT", "AIF3 Capture", 0, SND_SOC_NOPM, 0, 0),
+SND_SOC_DAPM_AIF_OUT("AIF3ADCDAT", "AIF3 Capture", 0, SND_SOC_NOPM, 0, 0),
 
 SND_SOC_DAPM_SUPPLY("TOCLK", WM8994_CLOCKING_1, 4, 0, NULL, 0),
 
@@ -2244,7 +2244,7 @@ static int wm8994_set_dai_sysclk(struct snd_soc_dai *dai,
 			snd_soc_update_bits(codec, WM8994_POWER_MANAGEMENT_2,
 					    WM8994_OPCLK_ENA, 0);
 		}
-
+            break;
 	default:
 		return -EINVAL;
 	}
@@ -2423,6 +2423,7 @@ static int wm8994_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_DSP_B:
 		aif1 |= WM8994_AIF1_LRCLK_INV;
+            break;
 	case SND_SOC_DAIFMT_DSP_A:
 		aif1 |= 0x18;
 		break;
@@ -2574,6 +2575,7 @@ static int wm8994_hw_params(struct snd_pcm_substream *substream,
 		default:
 			return 0;
 		}
+            break;
 	default:
 		return -EINVAL;
 	}
@@ -2731,6 +2733,7 @@ static int wm8994_aif3_hw_params(struct snd_pcm_substream *substream,
 		default:
 			return 0;
 		}
+            break;
 	default:
 		return 0;
 	}
@@ -3497,6 +3500,7 @@ static int wm8994_codec_probe(struct snd_soc_codec *codec)
 			wm8994->hubs.dcs_readback_mode = 1;
 			break;
 		}
+            break;
 
 	case WM8958:
 		wm8994->hubs.dcs_readback_mode = 1;
@@ -3560,6 +3564,7 @@ static int wm8994_codec_probe(struct snd_soc_codec *codec)
 					 "Failed to request Mic detect IRQ: %d\n",
 					 ret);
 		}
+            break;
 	}
 
 	/* Remember if AIFnLRCLK is configured as a GPIO.  This should be

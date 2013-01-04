@@ -14,8 +14,8 @@
 #define __MACH_TEGRA_X2_NV_H
 
 //                                                                            
-#define LGE_NVDATA_PARTITION			"/dev/block/mmcblk0p5"
-
+//#define LGE_NVDATA_PARTITION			"/dev/block/mmcblk0p5" Mazout360 : This is not the right partition ?
+#define LGE_NVDATA_PARTITION			"/dev/block/mmcblk0p3"
 
 // modify this file and /android/vendor/lge/tegra/core/system/fastboot/lge_boot/inc/lge_boot_utils.h
 typedef enum{
