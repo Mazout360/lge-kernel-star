@@ -5,13 +5,13 @@
  * DHD OS, bus, and protocol modules.
  *
  * Copyright (C) 1999-2010, Broadcom Corporation
- * 
+ *
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
  * under the terms of the GNU General Public License version 2 (the "GPL"),
  * available at http://www.broadcom.com/licenses/GPLv2.php, with the
  * following added to such license:
- * 
+ *
  *      As a special exception, the copyright holders of this software give you
  * permission to link this software with independent modules, and to copy and
  * distribute the resulting executable under terms of your choice, provided that
@@ -19,7 +19,7 @@
  * the license of that module.  An independent module is a module which is not
  * derived from this software.  The special exception does not apply to any
  * modifications of the software.
- * 
+ *
  *      Notwithstanding the above, under no circumstances may you combine this
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
@@ -109,7 +109,7 @@ typedef struct dhd_pub {
 	struct dhd_bus *bus;	/* Bus module handle */
 	struct dhd_prot *prot;	/* Protocol module handle */
 	struct dhd_info  *info; /* Info module handle */
-
+    
 	/* Internal dhd items */
 	bool up;		/* Driver up/down (to OS) */
 	bool txoff;		/* Transmit flow-controlled */
@@ -119,13 +119,13 @@ typedef struct dhd_pub {
 	uint maxctl;		/* Max size rxctl request from proto to bus */
 	uint rxsz;		/* Rx buffer size bus module should use */
 	uint8 wme_dp;	/* wme discard priority */
-
+    
 	/* Dongle media info */
 	bool iswl;		/* Dongle-resident driver is wl */
 	ulong drv_version;	/* Version of dongle-resident driver */
 	struct ether_addr mac;	/* MAC address obtained from dongle */
 	dngl_stats_t dstats;	/* Stats for dongle-based data */
-
+    
 	/* Additional stats for the bus level */
 	ulong tx_packets;	/* Data packets sent to dongle */
 	ulong tx_multicast;	/* Multicast data packets sent to dongle */
@@ -140,18 +140,18 @@ typedef struct dhd_pub {
 	ulong rx_dropped;	/* Packets dropped locally (no memory) */
 	ulong rx_flushed;  /* Packets flushed due to unscheduled sendup thread */
 	ulong wd_dpc_sched;   /* Number of times dhd dpc scheduled by watchdog timer */
-
+    
 	ulong rx_readahead_cnt;	/* Number of packets where header read-ahead was used. */
 	ulong tx_realloc;	/* Number of tx packets we had to realloc for headroom */
 	ulong fc_packets;       /* Number of flow control pkts recvd */
-
+    
 	/* Last error return */
 	int bcmerror;
 	uint tickcnt;
-
+    
 	/* Last error from dongle */
 	int dongle_error;
-
+    
 	/* Suspend disable flag  flag */
 	int suspend_disable_flag; /* "1" to disable all extra powersaving during suspend */
 	int in_suspend;			/* flag set to 1 when early suspend called */
@@ -159,66 +159,67 @@ typedef struct dhd_pub {
 	int pno_enable;                 /* pno status : "1" is pno enable */
 #endif /* PNO_SUPPORT */
 	int dtim_skip;         /* dtim skip , default 0 means wake each dtim */
-
+    
 	/* Pkt filter defination */
 	char * pktfilter[100];
 	int pktfilter_count;
-
+    
 	wl_country_t dhd_cspec;		/* Current Locale info */
 	char eventmask[WL_EVENTING_MASK_LEN];
-
+    
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined(CONFIG_HAS_WAKELOCK)
 	struct wake_lock 	wakelock[WAKE_LOCK_MAX];
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined (CONFIG_HAS_WAKELOCK) */
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)) && 1
 	struct mutex 	wl_start_stop_lock; /* lock/unlock for Android start/stop */
 	struct mutex 	wl_softap_lock;		 /* lock/unlock for any SoftAP/STA settings */
-#endif 
+#endif
 } dhd_pub_t;
 
 
-	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined(CONFIG_PM_SLEEP)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined(CONFIG_PM_SLEEP)
 
-	#define DHD_PM_RESUME_WAIT_INIT(a) DECLARE_WAIT_QUEUE_HEAD(a);
-	#define _DHD_PM_RESUME_WAIT(a, b) do {\
-			int retry = 0; \
-			smp_mb(); \
-			while (dhd_mmc_suspend && retry++ != b) { \
-				wait_event_timeout(a, FALSE, HZ/100); \
-			} \
-		} 	while (0)
-	#define DHD_PM_RESUME_WAIT(a) 			_DHD_PM_RESUME_WAIT(a, 200)
-	#define DHD_PM_RESUME_WAIT_FOREVER(a) 	_DHD_PM_RESUME_WAIT(a, ~0)
-	#define DHD_PM_RESUME_RETURN_ERROR(a)	do { if (dhd_mmc_suspend) return a; } while (0)
-	#define DHD_PM_RESUME_RETURN		do { if (dhd_mmc_suspend) return; } while (0)
+#define DHD_PM_RESUME_WAIT_INIT(a) DECLARE_WAIT_QUEUE_HEAD(a);
+#define _DHD_PM_RESUME_WAIT(a, b) do {\
+int retry = 0; \
+smp_mb(); \
+while (dhd_mmc_suspend && retry++ != b) { \
+wait_event_timeout(a, FALSE, HZ/100); \
+} \
+} 	while (0)
+// #define DHD_PM_RESUME_WAIT(a) 			_DHD_PM_RESUME_WAIT(a, 30)
+#define DHD_PM_RESUME_WAIT(a) 			_DHD_PM_RESUME_WAIT(a, 200)
+#define DHD_PM_RESUME_WAIT_FOREVER(a) 	_DHD_PM_RESUME_WAIT(a, ~0)
+#define DHD_PM_RESUME_RETURN_ERROR(a)	do { if (dhd_mmc_suspend) return a; } while (0)
+#define DHD_PM_RESUME_RETURN		do { if (dhd_mmc_suspend) return; } while (0)
 
-	#define DHD_SPINWAIT_SLEEP_INIT(a) DECLARE_WAIT_QUEUE_HEAD(a);
-	#define SPINWAIT_SLEEP(a, exp, us) do { \
-		uint countdown = (us) + 9999; \
-		while ((exp) && (countdown >= 10000)) { \
-			wait_event_interruptible_timeout(a, FALSE, HZ/100); \
-			countdown -= 10000; \
-		} \
-	} while (0)
+#define DHD_SPINWAIT_SLEEP_INIT(a) DECLARE_WAIT_QUEUE_HEAD(a);
+#define SPINWAIT_SLEEP(a, exp, us) do { \
+uint countdown = (us) + 9999; \
+while ((exp) && (countdown >= 10000)) { \
+wait_event_interruptible_timeout(a, FALSE, HZ/100); \
+countdown -= 10000; \
+} \
+} while (0)
 
-	#else
+#else
 
-	#define DHD_PM_RESUME_WAIT_INIT(a)
-	#define DHD_PM_RESUME_WAIT(a)
-	#define DHD_PM_RESUME_WAIT_FOREVER(a)
-	#define DHD_PM_RESUME_RETURN_ERROR(a)
-	#define DHD_PM_RESUME_RETURN
+#define DHD_PM_RESUME_WAIT_INIT(a)
+#define DHD_PM_RESUME_WAIT(a)
+#define DHD_PM_RESUME_WAIT_FOREVER(a)
+#define DHD_PM_RESUME_RETURN_ERROR(a)
+#define DHD_PM_RESUME_RETURN
 
-	#define DHD_SPINWAIT_SLEEP_INIT(a)
-	#define SPINWAIT_SLEEP(a, exp, us)  do { \
-		uint countdown = (us) + 9; \
-		while ((exp) && (countdown >= 10)) { \
-			OSL_DELAY(10);  \
-			countdown -= 10;  \
-		} \
-	} while (0)
+#define DHD_SPINWAIT_SLEEP_INIT(a)
+#define SPINWAIT_SLEEP(a, exp, us)  do { \
+uint countdown = (us) + 9; \
+while ((exp) && (countdown >= 10)) { \
+OSL_DELAY(10);  \
+countdown -= 10;  \
+} \
+} while (0)
 
-	#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined(CONFIG_PM_SLEEP) */
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)) && defined(CONFIG_PM_SLEEP) */
 /*sangjun.bae 2012 */
 /* #ifndef DHDTHREAD*/
 #undef	SPINWAIT_SLEEP
@@ -271,7 +272,7 @@ inline static void MUTEX_UNLOCK_SOFTAP_SET(dhd_pub_t * dhdp)
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)) && 1
 extern struct mutex  g_wl_ss_scan_lock;		 /* lock/unlock for Scan/Cache settings */
-#endif 
+#endif
 
 inline static void MUTEX_LOCK_WL_SCAN_SET_INIT(void)
 {
@@ -340,7 +341,7 @@ typedef struct dhd_if_event {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)) && 1
 extern void dhd_os_start_lock(dhd_pub_t *pub);
 extern void dhd_os_start_unlock(dhd_pub_t *pub);
-#endif 
+#endif
 extern unsigned long dhd_os_spin_lock(dhd_pub_t *pub);
 extern void dhd_os_spin_unlock(dhd_pub_t *pub, unsigned long flags);
 /*
@@ -414,7 +415,7 @@ extern int dhd_customer_oob_irq_map(unsigned long *irq_flags_ptr);
 extern void dhd_os_sdtxlock(dhd_pub_t * pub);
 extern void dhd_os_sdtxunlock(dhd_pub_t * pub);
 
-//int setScheduler(struct task_struct *p, int policy, struct sched_param *param); //before ver. sangjun.bae 2012 
+//int setScheduler(struct task_struct *p, int policy, struct sched_param *param); //before ver. sangjun.bae 2012
 //patched version 2012 sangjun.bae START
 #if defined(DHDTHREAD)
 struct task_struct;
@@ -442,7 +443,7 @@ extern void wl_event_to_host_order(wl_event_msg_t * evt);
 extern void dhd_common_init(void);
 
 extern int dhd_add_if(struct dhd_info *dhd, int ifidx, void *handle,
-	char *name, uint8 *mac_addr, uint32 flags, uint8 bssidx);
+                      char *name, uint8 *mac_addr, uint32 flags, uint8 bssidx);
 extern void dhd_del_if(struct dhd_info *dhd, int ifidx);
 
 extern void dhd_vif_add(struct dhd_info *dhd, int ifidx, char * name);
@@ -540,11 +541,11 @@ extern uint dhd_pktgen_len;
 #define MOD_PARAM_PATHLEN	2048
 extern char fw_path[MOD_PARAM_PATHLEN];
 extern char nv_path[MOD_PARAM_PATHLEN];
-/*                                                   */
+/* LGE_CHANGE_S [yoohoo@lge.com] 2009-04-03, configs */
 #if defined(CONFIG_LGE_BCM432X_PATCH)
 extern char config_path[MOD_PARAM_PATHLEN];
-#endif /*                          */
-/*                                                   */
+#endif /* CONFIG_LGE_BCM432X_PATCH */
+/* LGE_CHANGE_E [yoohoo@lge.com] 2009-04-03, configs */
 
 /* For supporting multiple interfaces */
 #define DHD_MAX_IFS	16

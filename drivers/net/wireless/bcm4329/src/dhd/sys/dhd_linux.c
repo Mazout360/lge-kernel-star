@@ -160,12 +160,18 @@ static int wifi_remove(struct platform_device *pdev)
 static int wifi_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	DHD_TRACE(("##> %s\n", __FUNCTION__));
+#if defined (OOB_INTR_ONLY)
+	bcmsdh_oob_intr_set(0);
+#endif
 	return 0;
 }
 static int wifi_resume(struct platform_device *pdev)
 {
 	DHD_TRACE(("##> %s\n", __FUNCTION__));
-    return 0;
+#if defined (OOB_INTR_ONLY)
+    bcmsdh_oob_intr_set(1);
+#endif
+	return 0;
 }
 
 static struct platform_driver wifi_device = {
@@ -560,36 +566,22 @@ extern uint wl_dtim_val;
 #endif
 static int dhd_set_suspend(int value, dhd_pub_t *dhd)
 {
-#if 0 //
 	int power_mode = PM_MAX;
 	/* wl_pkt_filter_enable_t	enable_parm; */
 	char iovbuf[32];
 	int bcn_li_dtim = 3;
-#endif
-#if defined(CONFIG_BRCM_LGE_WL_ARPOFFLOAD)	/*Setting dtim.	20110120*/
-	char iovbuf[32];
-	int bcn_li_dtim = 0;
-#endif
-    //
-#if 1
-	uint roamvar = 1;
-	//char iovbuf[32];
-#endif /* if 1 */
     
-	DHD_TRACE(("%s: enter, value = %d in_suspend=%d\n", \
-               __FUNCTION__, value, dhd->in_suspend));
+	printk("%s: enter, value = %d in_suspend=%d\n", \
+           __FUNCTION__, value, dhd->in_suspend);
     
-	if (dhd && dhd->up) {  //
-        //	if (dhd ) {
+	if (dhd && dhd->up) {
 		if (value && dhd->in_suspend) {
             
             /* Kernel suspended */
-            DHD_TRACE(("%s: force extra Suspend setting \n", __FUNCTION__));
+            printk("%s: force extra Suspend setting \n", __FUNCTION__);
             
-#if 0 //
             dhdcdc_set_ioctl(dhd, 0, WLC_SET_PM,
                              (char *)&power_mode, sizeof(power_mode));
-#endif
             
             /* Enable packet filter, only allow unicast packet to send up */
             dhd_set_packet_filter(1, dhd);
@@ -598,43 +590,27 @@ static int dhd_set_suspend(int value, dhd_pub_t *dhd)
             if(ap_priv_running == TRUE)
                 ap_suspend_status = 1;
 #endif
+            
             /* if dtim skip setup as default force it to wake each thrid dtim
              *  for better power saving.
              *  Note that side effect is chance to miss BC/MC packet
+             *
+             * pengus77: nexus devices use this, so i'll put it back ;)
              */
-#if 0 //
             bcn_li_dtim = dhd_get_dtim_skip(dhd);
             bcm_mkiovar("bcn_li_dtim", (char *)&bcn_li_dtim,
                         4, iovbuf, sizeof(iovbuf));
+            printk("%s: setting dtim skip to %d\n", __FUNCTION__, bcn_li_dtim);
             dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-#endif
-#if defined(CONFIG_BRCM_LGE_WL_ARPOFFLOAD)	/*Setting dtim.	20110120 */
-            bcn_li_dtim = wl_dtim_val;
-            printk("%s:%d wl_dtim_val = %d\n",__func__,__LINE__,wl_dtim_val);
-            if(bcn_li_dtim > 0){
-                bcm_mkiovar("bcn_li_dtim", (char *)&bcn_li_dtim,
-							4, iovbuf, sizeof(iovbuf));
-                dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-            }
-#endif
-            //
-#if 1
-            /* Disable build-in roaming during suspend */
-            bcm_mkiovar("roam_off", (char *)&roamvar, 4, \
-                        iovbuf, sizeof(iovbuf));
-            dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-#endif /* if 1 */
             
         } else {
             
             /* Kernel resumed  */
-            DHD_TRACE(("%s: Remove extra suspend setting \n", __FUNCTION__));
+            printk("%s: Remove extra suspend setting \n", __FUNCTION__);
             
-#if 0 //
             power_mode = PM_FAST;
             dhdcdc_set_ioctl(dhd, 0, WLC_SET_PM, (char *)&power_mode,
                              sizeof(power_mode));
-#endif
             
             /* disable pkt filter */
             dhd_set_packet_filter(0, dhd);
@@ -643,27 +619,13 @@ static int dhd_set_suspend(int value, dhd_pub_t *dhd)
             if(ap_priv_running == TRUE)
                 ap_suspend_status = 0;
 #endif
-#if 0 //
+            
             /* restore pre-suspend setting for dtim_skip */
+            bcn_li_dtim = 0;
             bcm_mkiovar("bcn_li_dtim", (char *)&dhd->dtim_skip,
                         4, iovbuf, sizeof(iovbuf));
             
             dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-#endif
-#if defined(CONFIG_BRCM_LGE_WL_ARPOFFLOAD)	/*Setting dtim.	20110120*/
-            bcn_li_dtim = 0;
-            bcm_mkiovar("bcn_li_dtim", (char *)&bcn_li_dtim,
-                        4, iovbuf, sizeof(iovbuf));
-            
-            dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-#endif
-            //
-#if 1
-            roamvar = 0; /* default - roaming enabled */
-            bcm_mkiovar("roam_off", (char *)&roamvar, 4, iovbuf, \
-                        sizeof(iovbuf));
-            dhdcdc_set_ioctl(dhd, 0, WLC_SET_VAR, iovbuf, sizeof(iovbuf));
-#endif /* if 1 */
         }
 	}
     
@@ -686,7 +648,7 @@ static void dhd_early_suspend(struct early_suspend *h)
 {
 	struct dhd_info *dhd = container_of(h, struct dhd_info, early_suspend);
     
-	DHD_TRACE(("%s: enter\n", __FUNCTION__));
+	printk("%s: enter\n", __FUNCTION__);
     
 	if (dhd)
 		dhd_suspend_resume_helper(dhd, 1);
@@ -697,7 +659,7 @@ static void dhd_late_resume(struct early_suspend *h)
 {
 	struct dhd_info *dhd = container_of(h, struct dhd_info, early_suspend);
     
-	DHD_TRACE(("%s: enter\n", __FUNCTION__));
+	printk("%s: enter\n", __FUNCTION__);
     
 	if (dhd)
 		dhd_suspend_resume_helper(dhd, 0);
