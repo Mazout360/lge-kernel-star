@@ -24,6 +24,7 @@
 #include "bus_client.h"
 
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/string.h>
 #include <linux/spinlock.h>
 #include <linux/fs.h>
@@ -131,7 +132,7 @@ static int nvhost_channelrelease(struct inode *inode, struct file *filp)
 		nvhost_job_put(priv->job);
 
 	nvmap_client_put(priv->nvmap);
-	kfree(priv);
+	vfree(priv);
 	return 0;
 }
 
@@ -146,7 +147,7 @@ static int nvhost_channelopen(struct inode *inode, struct file *filp)
 		return -ENOMEM;
 	trace_nvhost_channel_open(ch->dev->name);
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = vzalloc(sizeof(*priv));
 	if (!priv) {
 		nvhost_putchannel(ch, NULL);
 		return -ENOMEM;

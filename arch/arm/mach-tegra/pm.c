@@ -217,6 +217,8 @@ static const char *tegra_suspend_name[TEGRA_MAX_SUSPEND_MODE] = {
 	[TEGRA_SUSPEND_LP0]	= "lp0",
 };
 
+static bool disallow_lp2;
+
 unsigned long tegra_cpu_power_good_time(void)
 {
 	if (WARN_ON_ONCE(!pdata))
@@ -519,6 +521,11 @@ bool tegra_set_cpu_in_lp2(int cpu)
 	bool last_cpu = false;
 
 	spin_lock(&tegra_lp2_lock);
+    if (disallow_lp2) {
+        spin_unlock(&tegra_lp2_lock);
+        tegra_cpu_wfi();
+        return;
+    }
 	BUG_ON(cpumask_test_cpu(cpu, &tegra_in_lp2));
 	cpumask_set_cpu(cpu, &tegra_in_lp2);
 
@@ -698,6 +705,9 @@ static int tegra_suspend_prepare_late(void)
 {
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
 	disable_irq(INT_SYS_STATS_MON);
+    spin_lock(&tegra_lp2_lock);
+    disallow_lp2 = true;
+    spin_unlock(&tegra_lp2_lock);
 #endif
 	return 0;
 }
@@ -706,6 +716,9 @@ static void tegra_suspend_wake(void)
 {
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
 	enable_irq(INT_SYS_STATS_MON);
+    spin_lock(&tegra_lp2_lock);
+    disallow_lp2 = false;
+    spin_unlock(&tegra_lp2_lock);
 #endif
 }
 

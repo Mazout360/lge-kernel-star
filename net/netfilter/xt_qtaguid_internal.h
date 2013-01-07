@@ -40,9 +40,9 @@
 #define DDEBUG
 
 #define MSK_DEBUG(mask, ...) do {                           \
-		if (unlikely(qtaguid_debug_mask & (mask)))  \
-			pr_debug(__VA_ARGS__);              \
-	} while (0)
+if (unlikely(qtaguid_debug_mask & (mask)))  \
+pr_debug(__VA_ARGS__);              \
+} while (0)
 #ifdef IDEBUG
 #define IF_DEBUG(...) MSK_DEBUG(IDEBUG_MASK, __VA_ARGS__)
 #else
@@ -201,8 +201,9 @@ struct iface_stat {
 	bool active;
 	/* net_dev is only valid for active iface_stat */
 	struct net_device *net_dev;
-
-	struct byte_packet_counters totals[IFS_MAX_DIRECTIONS];
+    
+	struct byte_packet_counters totals_via_dev[IFS_MAX_DIRECTIONS];
+	struct byte_packet_counters totals_via_skb[IFS_MAX_DIRECTIONS];
 	/*
 	 * We keep the last_known, because some devices reset their counters
 	 * just before NETDEV_UP, while some will reset just before
@@ -214,9 +215,9 @@ struct iface_stat {
 	struct byte_packet_counters last_known[IFS_MAX_DIRECTIONS];
 	/* last_known is usable when last_known_valid is true */
 	bool last_known_valid;
-
+    
 	struct proc_dir_entry *proc_ptr;
-
+    
 	struct rb_root tag_stat_tree;
 	spinlock_t tag_stat_list_lock;
 };
@@ -241,7 +242,7 @@ struct sock_tag {
 	/* Used to associate with a given pid */
 	struct list_head list;   /* in proc_qtu_data.sock_tag_list */
 	pid_t pid;
-
+    
 	tag_t tag;
 };
 
@@ -252,8 +253,10 @@ struct qtaguid_event_counts {
 	atomic64_t counter_set_changes;
 	atomic64_t delete_cmds;
 	atomic64_t iface_events;  /* Number of NETDEV_* events handled */
-
+    
 	atomic64_t match_calls;   /* Number of times iptables called mt */
+	/* Number of times iptables called mt from pre or post routing hooks */
+	atomic64_t match_calls_prepost;
 	/*
 	 * match_found_sk_*: numbers related to the netfilter matching
 	 * function finding a sock for the sk_buff.
@@ -292,7 +295,7 @@ struct tag_counter_set {
 struct uid_tag_data {
 	struct rb_node node;
 	uid_t uid;
-
+    
 	/*
 	 * For the uid, how many accounting tags have been set.
 	 */
@@ -305,7 +308,7 @@ struct uid_tag_data {
 
 struct tag_ref {
 	struct tag_node tn;
-
+    
 	/*
 	 * This tracks the number of active sockets that have a tag on them
 	 * which matches this tag_ref.tn.tag.
@@ -318,9 +321,9 @@ struct tag_ref {
 struct proc_qtu_data {
 	struct rb_node node;
 	pid_t pid;
-
+    
 	struct uid_tag_data *parent_tag_data;
-
+    
 	/* Tracks the sock_tags that need freeing upon this proc's death */
 	struct list_head sock_tag_list;
 	/* No spinlock_t sock_tag_list_lock; use the global one. */
