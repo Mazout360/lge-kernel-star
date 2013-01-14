@@ -40,6 +40,7 @@
 #include <linux/string.h>
 #include <linux/platform_device.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 
 #include <linux/uaccess.h>
 
@@ -190,6 +191,16 @@ static inline int pm_qos_get_value(struct pm_qos_object *o)
 		/* runtime check for not using enum */
 		BUG();
 	}
+}
+
+static inline s32 pm_qos_read_value(struct pm_qos_object *o)
+{
+	return o->target_value;
+}
+
+static inline void pm_qos_set_value(struct pm_qos_object *o, s32 value)
+{
+	o->target_value = value;
 }
 
 static inline s32 pm_qos_read_value(struct pm_qos_object *o)
@@ -446,7 +457,7 @@ static ssize_t pm_qos_power_read(struct file *filp, char __user *buf,
 	s32 value;
 	unsigned long flags;
 	struct pm_qos_object *o;
-	struct pm_qos_request_list *pm_qos_req = filp->private_data;;
+	struct pm_qos_request_list *pm_qos_req = filp->private_data;
 
 	if (!pm_qos_req)
 		return -EINVAL;
@@ -465,24 +476,36 @@ static ssize_t pm_qos_power_write(struct file *filp, const char __user *buf,
 		size_t count, loff_t *f_pos)
 {
 	s32 value;
-	int x;
-	char ascii_value[11];
 	struct pm_qos_request_list *pm_qos_req;
 
 	if (count == sizeof(s32)) {
 		if (copy_from_user(&value, buf, sizeof(s32)))
 			return -EFAULT;
-	} else if (count == 11) { /* len('0x12345678/0') */
-		if (copy_from_user(ascii_value, buf, 11))
+	} else if (count <= 11) { /* ASCII perhaps? */
+		char ascii_value[11];
+		unsigned long int ulval;
+		int ret;
+
+		if (copy_from_user(ascii_value, buf, count))
 			return -EFAULT;
-		if (strlen(ascii_value) != 10)
+
+		if (count > 10) {
+			if (ascii_value[10] == '\n')
+				ascii_value[10] = '\0';
+			else
+				return -EINVAL;
+		} else {
+			ascii_value[count] = '\0';
+		}
+		ret = strict_strtoul(ascii_value, 16, &ulval);
+		if (ret) {
+			pr_debug("%s, 0x%lx, 0x%x\n", ascii_value, ulval, ret);
 			return -EINVAL;
-		x = sscanf(ascii_value, "%x", &value);
-		if (x != 1)
-			return -EINVAL;
-		pr_debug("%s, %d, 0x%x\n", ascii_value, x, value);
-	} else
+		}
+		value = (s32)lower_32_bits(ulval);
+	} else {
 		return -EINVAL;
+	}
 
 	pm_qos_req = filp->private_data;
 	pm_qos_update_request(pm_qos_req, value);

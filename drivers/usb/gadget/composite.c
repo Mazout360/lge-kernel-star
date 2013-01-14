@@ -747,6 +747,10 @@ static int get_string(struct usb_composite_dev *cdev,
 			if (len > 0)
 				return len;
 		}
+	} else if (value == USB_GADGET_DELAYED_STATUS && w_length != 0) {
+		WARN(cdev,
+			"%s: Delayed status not supported for w_length != 0",
+			__func__);
 	}
 	return -EINVAL;
 }

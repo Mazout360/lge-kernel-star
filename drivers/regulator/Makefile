@@ -53,4 +53,6 @@ obj-$(CONFIG_REGULATOR_GPIO_SWITCH)	+= gpio-switch-regulator.o
 obj-$(CONFIG_REGULATOR_AAT2870) += aat2870-regulator.o
 obj-$(CONFIG_REGULATOR_FAN53555) += fan53555-regulator.o
 obj-$(CONFIG_REGULATOR_LP8720)	+=	lp8720.o
+obj-$(CONFIG_REGULATOR_DB8500_PRCMU) += db8500-prcmu.o
+obj-$(CONFIG_REGULATOR_TPS65910) += tps65910-regulator.o
 ccflags-$(CONFIG_REGULATOR_DEBUG) += -DDEBUG

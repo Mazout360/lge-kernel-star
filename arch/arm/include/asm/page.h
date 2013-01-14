@@ -197,13 +197,13 @@ typedef unsigned long pgprot_t;
 
 typedef struct page *pgtable_t;
 
-#ifndef CONFIG_SPARSEMEM
+#ifdef CONFIG_HAVE_ARCH_PFN_VALID
 extern int pfn_valid(unsigned long);
 #endif
 
-extern phys_addr_t lowmem_limit;
-
 #include <asm/memory.h>
+
+extern phys_addr_t lowmem_limit;
 
 #endif /* !__ASSEMBLY__ */
 

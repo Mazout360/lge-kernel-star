@@ -772,7 +772,7 @@ int snd_soc_jack_add_gpios(struct snd_soc_jack *jack, int count,
 #endif
 //                                                          
 					      IRQF_TRIGGER_RISING |IRQF_TRIGGER_FALLING,
-					      jack->codec->dev->driver->name,
+					      gpios[i].name,
     //                                                          
 #if defined (CONFIG_MACH_STAR) || defined (CONFIG_MACH_BSSQ)
 					      headset_sw_data);

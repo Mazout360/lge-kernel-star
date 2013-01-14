@@ -98,7 +98,7 @@ struct bq27x00_reg_cache {
 	int time_to_empty_avg;
 	int time_to_full;
 	int charge_full;
-	int charge_counter;
+	int cycle_count;
 	int capacity;
 	int flags;
 
@@ -139,7 +139,7 @@ static enum power_supply_property bq27x00_battery_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
-	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_ENERGY_NOW,
 	POWER_SUPPLY_PROP_POWER_AVG,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
@@ -333,7 +333,7 @@ static void bq27x00_update(struct bq27x00_device_info *di)
 		cache.time_to_empty_avg = bq27x00_battery_read_time(di, BQ27x00_REG_TTECP);
 		cache.time_to_full = bq27x00_battery_read_time(di, BQ27x00_REG_TTF);
 		cache.charge_full = bq27x00_battery_read_lmd(di);
-		cache.charge_counter = bq27x00_battery_read_cyct(di);
+		cache.cycle_count = bq27x00_battery_read_cyct(di);
 
 		if (!is_bq27500)
 			cache.current_now = bq27x00_read(di, BQ27x00_REG_AI, false);
@@ -638,8 +638,8 @@ static int bq27x00_battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		ret = bq27x00_simple_value(di->charge_design_full, val);
 		break;
-	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
-		ret = bq27x00_simple_value(di->cache.charge_counter, val);
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		ret = bq27x00_simple_value(di->cache.cycle_count, val);
 		break;
 	case POWER_SUPPLY_PROP_ENERGY_NOW:
 		ret = bq27x00_battery_energy(di, val);

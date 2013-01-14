@@ -31,6 +31,8 @@
 
 #include <asm/mach/irq.h>
 
+#include <asm/mach/irq.h>
+
 #include <mach/iomap.h>
 #include "pm-irq.h"
 #include "pm.h"
@@ -586,6 +588,8 @@ static void tegra_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 	struct tegra_gpio_bank *bank;
 	int port;
 	int pin;
+    int unmasked = 0;
+    
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 
 	chained_irq_enter(chip, desc);
@@ -600,7 +604,8 @@ static void tegra_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 		for_each_set_bit(pin, &sta, 8)
 			generic_handle_irq(gpio_to_irq(gpio + pin));
 	}
-
+    
+    if (!unmasked)
 	chained_irq_exit(chip, desc);
 
 }

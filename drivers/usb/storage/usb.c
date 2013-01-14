@@ -472,6 +472,12 @@ static void adjust_quirks(struct us_data *us)
 		case 'c':
 			f |= US_FL_FIX_CAPACITY;
 			break;
+		case 'd':
+			f |= US_FL_NO_READ_DISC_INFO;
+			break;
+		case 'e':
+			f |= US_FL_NO_READ_CAPACITY_16;
+			break;
 		case 'h':
 			f |= US_FL_CAPACITY_HEURISTICS;
 			break;
@@ -483,6 +489,9 @@ static void adjust_quirks(struct us_data *us)
 			break;
 		case 'm':
 			f |= US_FL_MAX_SECTORS_64;
+			break;
+		case 'n':
+			f |= US_FL_INITIAL_READ10;
 			break;
 		case 'n':
 			f |= US_FL_INITIAL_READ10;
@@ -949,6 +958,13 @@ int usb_stor_probe2(struct us_data *us)
 	result = get_pipes(us);
 	if (result)
 		goto BadDevice;
+
+	/*
+	 * If the device returns invalid data for the first READ(10)
+	 * command, indicate the command should be retried.
+	 */
+	if (us->fflags & US_FL_INITIAL_READ10)
+		set_bit(US_FLIDX_REDO_READ10, &us->dflags);
 
 	/*
 	 * If the device returns invalid data for the first READ(10)

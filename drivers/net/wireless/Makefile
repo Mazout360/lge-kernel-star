@@ -67,3 +67,4 @@ obj-$(CONFIG_BRCM_USE_STATIC_BUF)       += bcm4329/
 endif
 # LGE_CHANGE_E, [WiFi][ella.hwang@lge.com, moon-wifi@lge.com], 20120319, for X2-KDDI(KS1103) ICS
 #obj-$(CONFIG_BCMDHD)	+= bcmdhd/
+obj-$(CONFIG_MWIFIEX)	+= mwifiex/

@@ -29,7 +29,9 @@ snd-soc-tegra-max98088-objs := tegra_max98088.o
 snd-soc-tegra-aic326x-objs := tegra_aic326x.o
 snd-soc-tegra-rt5640-objs := tegra_rt5640.o
 snd-soc-tegra-max98095-objs := tegra_max98095.o
-
+snd-soc-tegra-trimslice-objs := trimslice.o
+  
+obj-$(CONFIG_SND_SOC_TEGRA_TRIMSLICE) += snd-soc-tegra-trimslice.o
 obj-$(CONFIG_SND_SOC_TEGRA_WM8903) += snd-soc-tegra-wm8903.o
 obj-$(CONFIG_SND_SOC_TEGRA_WM8753) += snd-soc-tegra-wm8753.o
 obj-$(CONFIG_SND_SOC_TEGRA_WM8994) += snd-soc-tegra-wm8994.o

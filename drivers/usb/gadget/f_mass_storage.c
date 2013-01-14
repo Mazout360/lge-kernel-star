@@ -1644,37 +1644,6 @@ static int wedge_bulk_in_endpoint(struct fsg_dev *fsg)
 	return rc;
 }
 
-static int pad_with_zeros(struct fsg_dev *fsg)
-{
-	struct fsg_buffhd	*bh = fsg->common->next_buffhd_to_fill;
-	u32			nkeep = bh->inreq->length;
-	u32			nsend;
-	int			rc;
-
-	bh->state = BUF_STATE_EMPTY;		/* For the first iteration */
-	fsg->common->usb_amount_left = nkeep + fsg->common->residue;
-	while (fsg->common->usb_amount_left > 0) {
-
-		/* Wait for the next buffer to be free */
-		while (bh->state != BUF_STATE_EMPTY) {
-			rc = sleep_thread(fsg->common);
-			if (rc)
-				return rc;
-		}
-
-		nsend = min(fsg->common->usb_amount_left, FSG_BUFLEN);
-		memset(bh->buf + nkeep, 0, nsend - nkeep);
-		bh->inreq->length = nsend;
-		bh->inreq->zero = 0;
-		start_transfer(fsg, fsg->bulk_in, bh->inreq,
-			       &bh->inreq_busy, &bh->state);
-		bh = fsg->common->next_buffhd_to_fill = bh->next;
-		fsg->common->usb_amount_left -= nsend;
-		nkeep = 0;
-	}
-	return 0;
-}
-
 static int throw_away_data(struct fsg_common *common)
 {
 	struct fsg_buffhd	*bh;
@@ -1774,27 +1743,22 @@ static int finish_reply(struct fsg_common *common)
 				return -EIO;
 			common->next_buffhd_to_fill = bh->next;
 
-		/*
-		 * For Bulk-only, if we're allowed to stall then send the
-		 * short packet and halt the bulk-in endpoint.  If we can't
-		 * stall, pad out the remaining data with 0's.
-		 */
-		} else if (common->can_stall) {
-			bh->inreq->zero = 1;
-			if (!start_in_transfer(common, bh))
-				/* Don't know what to do if
-				 * common->fsg is NULL */
-				rc = -EIO;
-			common->next_buffhd_to_fill = bh->next;
-			if (common->fsg)
-				rc = halt_bulk_in_endpoint(common->fsg);
-		} else if (fsg_is_set(common)) {
-			rc = pad_with_zeros(common->fsg);
-		} else {
-			/* Don't know what to do if common->fsg is NULL */
-			rc = -EIO;
-		}
-		break;
+            /*
+             * For Bulk-only, mark the end of the data with a short
+             * packet.  If we are allowed to stall, halt the bulk-in
+             * endpoint.  (Note: This violates the Bulk-Only Transport
+             * specification, which requires us to pad the data if we
+             * don't halt the endpoint.  Presumably nobody will mind.)
+             */
+            } else {
+                bh->inreq->zero = 1;
+                if (!start_in_transfer(common, bh))
+                    rc = -EIO;
+                common->next_buffhd_to_fill = bh->next;
+                if (common->can_stall)
+                    rc = halt_bulk_in_endpoint(common->fsg);
+            }
+            break;
 
 	/*
 	 * We have processed all we want from the data the host has sent.
@@ -1975,8 +1939,8 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 		    common->lun, lun);
 
 	/* Check the LUN */
-	if (common->lun >= 0 && common->lun < common->nluns) {
-		curlun = &common->luns[common->lun];
+    if (common->lun < common->nluns) {
+    curlun = &common->luns[common->lun];
 		common->curlun = curlun;
 		if (common->cmnd[0] != REQUEST_SENSE) {
 			curlun->sense_data = SS_NO_SENSE;

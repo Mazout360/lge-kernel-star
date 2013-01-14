@@ -389,8 +389,8 @@ struct cx88_core {
 	struct mutex               lock;
 	/* various v4l controls */
 	u32                        freq;
-	atomic_t		   users;
-	atomic_t                   mpeg_users;
+	int                        users;
+	int                        mpeg_users;
 
 	/* cx88-video needs to access cx8802 for hybrid tuner pll access. */
 	struct cx8802_dev          *dvbdev;
@@ -504,6 +504,8 @@ struct cx8802_driver {
 	/* MPEG 8802 internal only */
 	int (*suspend)(struct pci_dev *pci_dev, pm_message_t state);
 	int (*resume)(struct pci_dev *pci_dev);
+
+	/* Callers to the following functions must hold core->lock */
 
 	/* Callers to the following functions must hold core->lock */
 

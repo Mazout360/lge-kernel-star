@@ -1020,6 +1020,7 @@ static int tegra_sdhci_pltfm_init(struct sdhci_host *host,
 	host->mmc->caps |= MMC_CAP_DISABLE;
 	/* enable 1/8V DDR capable */
 	host->mmc->caps |= MMC_CAP_1_8V_DDR;
+    host->mmc->pm_caps = plat->pm_flags;
 	if (plat->is_8bit)
 		host->mmc->caps |= MMC_CAP_8_BIT_DATA;
 	host->mmc->caps |= MMC_CAP_SDIO_IRQ;

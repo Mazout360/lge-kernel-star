@@ -1,5 +1,5 @@
 /*
- * Copyright 2010 Tilera Corporation. All Rights Reserved.
+ * Copyright 2011 Tilera Corporation. All Rights Reserved.
  *
  *   This program is free software; you can redistribute it and/or
  *   modify it under the terms of the GNU General Public License
@@ -59,6 +59,7 @@ int __write_once tile_plx_gen1;
 
 static struct pci_controller controllers[TILE_NUM_PCIE];
 static int num_controllers;
+static int pci_scan_flags[TILE_NUM_PCIE];
 
 static struct pci_ops tile_cfg_ops;
 
@@ -79,7 +80,7 @@ EXPORT_SYMBOL(pcibios_align_resource);
  * controller_id is the controller number, config type is 0 or 1 for
  * config0 or config1 operations.
  */
-static int __init tile_pcie_open(int controller_id, int config_type)
+static int __devinit tile_pcie_open(int controller_id, int config_type)
 {
 	char filename[32];
 	int fd;
@@ -95,7 +96,7 @@ static int __init tile_pcie_open(int controller_id, int config_type)
 /*
  * Get the IRQ numbers from the HV and set up the handlers for them.
  */
-static int __init tile_init_irqs(int controller_id,
+static int __devinit tile_init_irqs(int controller_id,
 				 struct pci_controller *controller)
 {
 	char filename[32];
@@ -226,7 +227,7 @@ static int tile_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 
-static void __init fixup_read_and_payload_sizes(void)
+static void __devinit fixup_read_and_payload_sizes(void)
 {
 	struct pci_dev *dev = NULL;
 	int smallest_max_payload = 0x1; /* Tile maxes out at 256 bytes. */
@@ -276,7 +277,7 @@ static void __init fixup_read_and_payload_sizes(void)
  * The controllers have been set up by the time we get here, by a call to
  * tile_pci_init.
  */
-static int __init pcibios_init(void)
+int __devinit pcibios_init(void)
 {
 	int i;
 
@@ -325,34 +326,45 @@ static int __init pcibios_init(void)
 	 * It allocates all of the resources (I/O memory, etc)
 	 * associated with the devices read in above.
 	 */
-
 	pci_assign_unassigned_resources();
 
 	/* Configure the max_read_size and max_payload_size values. */
 	fixup_read_and_payload_sizes();
 
 	/* Record the I/O resources in the PCI controller structure. */
-	for (i = 0; i < num_controllers; i++) {
-		struct pci_bus *root_bus = controllers[i].root_bus;
-		struct pci_bus *next_bus;
-		struct pci_dev *dev;
+	for (i = 0; i < TILE_NUM_PCIE; i++) {
+		/*
+		 * Do real pcibios init ops if the controller is initialized
+		 * by tile_pci_init() successfully and not initialized by
+		 * pcibios_init() yet to support PCIe hot-plug.
+		 */
+		if (pci_scan_flags[i] == 0 && controllers[i].ops != NULL) {
+			struct pci_bus *root_bus = controllers[i].root_bus;
+			struct pci_bus *next_bus;
+			struct pci_dev *dev;
 
-		list_for_each_entry(dev, &root_bus->devices, bus_list) {
-			/* Find the PCI host controller, ie. the 1st bridge. */
-			if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI &&
-				(PCI_SLOT(dev->devfn) == 0)) {
-				next_bus = dev->subordinate;
-				controllers[i].mem_resources[0] =
-					*next_bus->resource[0];
-				controllers[i].mem_resources[1] =
-					 *next_bus->resource[1];
-				controllers[i].mem_resources[2] =
-					 *next_bus->resource[2];
+			list_for_each_entry(dev, &root_bus->devices, bus_list) {
+				/*
+				 * Find the PCI host controller, ie. the 1st
+				 * bridge.
+				 */
+				if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI &&
+					(PCI_SLOT(dev->devfn) == 0)) {
+					next_bus = dev->subordinate;
+					controllers[i].mem_resources[0] =
+						*next_bus->resource[0];
+					controllers[i].mem_resources[1] =
+						 *next_bus->resource[1];
+					controllers[i].mem_resources[2] =
+						 *next_bus->resource[2];
 
-				break;
+					/* Setup flags. */
+					pci_scan_flags[i] = 1;
+
+					break;
+				}
 			}
 		}
-
 	}
 
 	return 0;
@@ -380,7 +392,7 @@ char __devinit *pcibios_setup(char *str)
 /*
  * This is called from the generic Linux layer.
  */
-void __init pcibios_update_irq(struct pci_dev *dev, int irq)
+void __devinit pcibios_update_irq(struct pci_dev *dev, int irq)
 {
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }

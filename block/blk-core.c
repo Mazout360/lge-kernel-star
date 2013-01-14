@@ -570,8 +570,6 @@ EXPORT_SYMBOL(blk_get_queue);
 
 static inline void blk_free_request(struct request_queue *q, struct request *rq)
 {
-	BUG_ON(rq->cmd_flags & REQ_ON_PLUG);
-
 	if (rq->cmd_flags & REQ_ELVPRIV)
 		elv_put_request(q, rq);
 	mempool_free(rq, q->rq.rq_pool);
@@ -1111,14 +1109,6 @@ static bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 {
 	const int ff = bio->bi_rw & REQ_FAILFAST_MASK;
 
-	/*
-	 * Debug stuff, kill later
-	 */
-	if (!rq_mergeable(req)) {
-		blk_dump_rq_flags(req, "back");
-		return false;
-	}
-
 	if (!ll_back_merge_fn(q, req, bio))
 		return false;
 
@@ -1133,6 +1123,7 @@ static bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	drive_stat_acct(req, 0);
+    elv_bio_merged(q, req, bio);
 	return true;
 }
 
@@ -1140,15 +1131,6 @@ static bool bio_attempt_front_merge(struct request_queue *q,
 				    struct request *req, struct bio *bio)
 {
 	const int ff = bio->bi_rw & REQ_FAILFAST_MASK;
-	sector_t sector;
-
-	/*
-	 * Debug stuff, kill later
-	 */
-	if (!rq_mergeable(req)) {
-		blk_dump_rq_flags(req, "front");
-		return false;
-	}
 
 	if (!ll_front_merge_fn(q, req, bio))
 		return false;
@@ -1157,8 +1139,6 @@ static bool bio_attempt_front_merge(struct request_queue *q,
 
 	if ((req->cmd_flags & REQ_FAILFAST_MASK) != ff)
 		blk_rq_set_mixed_merge(req);
-
-	sector = bio->bi_sector;
 
 	bio->bi_next = req->bio;
 	req->bio = bio;
@@ -1174,6 +1154,7 @@ static bool bio_attempt_front_merge(struct request_queue *q,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	drive_stat_acct(req, 0);
+    elv_bio_merged(q, req, bio);
 	return true;
 }
 
@@ -1321,10 +1302,6 @@ get_rq:
 			if (__rq->q != q)
 				plug->should_sort = 1;
 		}
-		/*
-		 * Debug flag, kill later
-		 */
-		req->cmd_flags |= REQ_ON_PLUG;
 		list_add_tail(&req->queuelist, &plug->list);
 		drive_stat_acct(req, 1);
 	} else {
@@ -1551,8 +1528,8 @@ static inline void __generic_make_request(struct bio *bio)
 			goto end_io;
 		}
 
-		blk_throtl_bio(q, &bio);
-
+        if (blk_throtl_bio(q, &bio))
+            goto end_io;
 		/*
 		 * If bio = NULL, bio has been throttled and will be submitted
 		 * later.
@@ -2761,7 +2738,6 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 			depth = 0;
 			spin_lock(q->queue_lock);
 		}
-		rq->cmd_flags &= ~REQ_ON_PLUG;
 
 		/*
 		 * rq is already accounted, so use raw insert

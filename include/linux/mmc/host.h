@@ -211,8 +211,13 @@ struct mmc_host {
 #define MMC_CAP_DRIVER_TYPE_A	(1 << 23)	/* Host supports Driver Type A */
 #define MMC_CAP_DRIVER_TYPE_C	(1 << 24)	/* Host supports Driver Type C */
 #define MMC_CAP_DRIVER_TYPE_D	(1 << 25)	/* Host supports Driver Type D */
-#define MMC_CAP_BKOPS		(1 << 26)	/* Host supports BKOPS */
-
+//#define MMC_CAP_BKOPS		(1 << 26)	/* Host supports BKOPS */
+#define MMC_CAP_MAX_CURRENT_200	(1 << 26)	/* Host max current limit is 200mA */
+#define MMC_CAP_MAX_CURRENT_400	(1 << 27)	/* Host max current limit is 400mA */
+#define MMC_CAP_MAX_CURRENT_600	(1 << 28)	/* Host max current limit is 600mA */
+#define MMC_CAP_MAX_CURRENT_800	(1 << 29)	/* Host max current limit is 800mA */
+#define MMC_CAP_CMD23		(1 << 30)	/* CMD23 supported. */
+    
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
 #ifdef CONFIG_MMC_CLKGATE
@@ -393,9 +398,19 @@ static inline int mmc_card_is_removable(struct mmc_host *host)
 	return !(host->caps & MMC_CAP_NONREMOVABLE) && mmc_assume_removable;
 }
 
-static inline int mmc_card_is_powered_resumed(struct mmc_host *host)
+static inline int mmc_card_keep_power(struct mmc_host *host)
 {
 	return host->pm_flags & MMC_PM_KEEP_POWER;
+}
+
+static inline int mmc_card_wake_sdio_irq(struct mmc_host *host)
+{
+    return host->pm_flags & MMC_PM_WAKE_SDIO_IRQ;
+}
+
+static inline int mmc_host_cmd23(struct mmc_host *host)
+{
+    return host->caps & MMC_CAP_CMD23;
 }
 
 #endif

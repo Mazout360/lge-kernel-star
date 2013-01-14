@@ -30,6 +30,8 @@
 #include "board-harmony.h"
 #include "pm.h"
 
+#include "board-harmony.h"
+
 #define PMC_CTRL		0x0
 #define PMC_CTRL_INTR_LOW	(1 << 17)
 

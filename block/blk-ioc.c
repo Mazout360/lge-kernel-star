@@ -19,11 +19,12 @@ static struct kmem_cache *iocontext_cachep;
 
 static void hlist_sched_dtor(struct io_context *ioc, struct hlist_head *list)
 {
-	if (!hlist_empty(list)) {
-		struct cfq_io_context *cic;
+    if (!hlist_empty(&ioc->cic_list)) {
+    struct cfq_io_context *cic;
 
-		cic = list_entry(list->first, struct cfq_io_context, cic_list);
-		cic->dtor(ioc);
+    cic = hlist_entry(ioc->cic_list.first, struct cfq_io_context,
+                          cic_list);
+    cic->dtor(ioc);
 	}
 }
 
@@ -56,10 +57,11 @@ static void hlist_sched_exit(struct io_context *ioc, struct hlist_head *list)
 {
 	rcu_read_lock();
 
-	if (!hlist_empty(list)) {
+	if (!hlist_empty(&ioc->cic_list)) {
 		struct cfq_io_context *cic;
 
-		cic = list_entry(list->first, struct cfq_io_context, cic_list);
+		cic = hlist_entry(ioc->cic_list.first, struct cfq_io_context,
+                          cic_list);
 		cic->exit(ioc);
 	}
 	rcu_read_unlock();
@@ -100,6 +102,9 @@ struct io_context *alloc_io_context(gfp_t gfp_flags, int node)
 		INIT_RADIX_TREE(&ret->bfq_radix_root, GFP_ATOMIC | __GFP_HIGH);
 		INIT_HLIST_HEAD(&ret->bfq_cic_list);
 		ret->ioc_data = NULL;
+#if defined(CONFIG_BLK_CGROUP) || defined(CONFIG_BLK_CGROUP_MODULE)
+		ret->cgroup_changed = 0;
+#endif
 	}
 
 	return ret;

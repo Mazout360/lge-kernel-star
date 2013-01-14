@@ -19,7 +19,7 @@
 #include <linux/firmware.h>
 #include <linux/i2c.h>
 #include <linux/i2c/atmel_mxt_ts.h>
-#include <linux/input.h>
+#include <linux/input/mt.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #if defined(CONFIG_HAS_EARLYSUSPEND)
@@ -634,19 +634,21 @@ static void mxt_input_report(struct mxt_data *data, int single_id)
 		if (!finger[id].status)
 			continue;
 
-		input_report_abs(input_dev, ABS_MT_TOUCH_MAJOR,
-				finger[id].status != MXT_RELEASE ?
-				finger[id].area : 0);
-		input_report_abs(input_dev, ABS_MT_POSITION_X,
-				finger[id].x);
-		input_report_abs(input_dev, ABS_MT_POSITION_Y,
-				finger[id].y);
-		input_mt_sync(input_dev);
+		input_mt_slot(input_dev, id);
+		input_mt_report_slot_state(input_dev, MT_TOOL_FINGER,
+				finger[id].status != MXT_RELEASE);
 
-		if (finger[id].status == MXT_RELEASE)
-			finger[id].status = 0;
-		else
+		if (finger[id].status != MXT_RELEASE) {
 			finger_num++;
+			input_report_abs(input_dev, ABS_MT_TOUCH_MAJOR,
+					finger[id].area);
+			input_report_abs(input_dev, ABS_MT_POSITION_X,
+					finger[id].x);
+			input_report_abs(input_dev, ABS_MT_POSITION_Y,
+					finger[id].y);
+		} else {
+			finger[id].status = 0;
+		}
 	}
 
 	input_report_key(input_dev, BTN_TOUCH, finger_num > 0);
@@ -1144,6 +1146,20 @@ static void mxt_calc_resolution(struct mxt_data *data)
 	}
 }
 
+static void mxt_calc_resolution(struct mxt_data *data)
+{
+	unsigned int max_x = data->pdata->x_size - 1;
+	unsigned int max_y = data->pdata->y_size - 1;
+
+	if (data->pdata->orient & MXT_XY_SWITCH) {
+		data->max_x = max_y;
+		data->max_y = max_x;
+	} else {
+		data->max_x = max_x;
+		data->max_y = max_y;
+	}
+}
+
 static ssize_t mxt_object_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -1288,6 +1304,10 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	}
 
 	enable_irq(data->irq);
+
+	error = mxt_make_highchg(data);
+	if (error)
+		return error;
 
 	error = mxt_make_highchg(data);
 	if (error)
@@ -1684,6 +1704,10 @@ static int __devinit mxt_probe(struct i2c_client *client,
 		dev_err(&client->dev, "Failed to make high CHG\n");
 		goto err_free_irq;
 	}
+
+	error = mxt_make_highchg(data);
+	if (error)
+		goto err_free_irq;
 
 	error = input_register_device(input_dev);
 	if (error) {
