@@ -2210,9 +2210,11 @@ if (l > EXT3_N_BLOCKS * 4) {
         /*
         * For non-fast symlinks, we just allocate inode and put it on
          * orphan list in the first transaction => we need bitmap,
-        * group descriptor, sb, inode block, quota blocks.
-        */
-        credits = 4 + EXT3_MAXQUOTAS_INIT_BLOCKS(dir->i_sb);
+         * group descriptor, sb, inode block, quota blocks, and
+         * possibly selinux xattr blocks.
+  		 */
+    credits = 4 + EXT3_MAXQUOTAS_INIT_BLOCKS(dir->i_sb) +
+     			  EXT3_XATTR_TRANS_BLOCKS;
     } else {
             /*
             * Fast symlink. We have to add entry to directory
