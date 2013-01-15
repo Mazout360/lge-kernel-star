@@ -177,7 +177,7 @@ void snd_soc_jack_report(struct snd_soc_jack *jack, int status, int mask)
 
 	snd_soc_dapm_sync(dapm);
 
-	snd_jack_report(jack->jack, status);
+	snd_jack_report(jack->jack, jack->status);
 
 out:
 	mutex_unlock(&codec->mutex);
@@ -781,7 +781,7 @@ int snd_soc_jack_add_gpios(struct snd_soc_jack *jack, int count,
 #endif
 //                                                          
 
-		if (ret)
+		if (ret < 0)
 			goto err;
 
 		if (gpios[i].wake) {
