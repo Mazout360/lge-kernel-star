@@ -184,56 +184,15 @@ MODULE_DEVICE_TABLE(platform, sdhci_pltfm_ids);
 static int sdhci_pltfm_suspend(struct platform_device *dev, pm_message_t state)
 {
 	struct sdhci_host *host = platform_get_drvdata(dev);
-	int ret;
 
-	ret = sdhci_suspend_host(host, state);
-	if (ret) {
-		dev_err(&dev->dev, "suspend failed, error = %d\n", ret);
-		return ret;
-	}
-	
-#if defined (CONFIG_MACH_STAR) //                                                                     
-	if(host->irq==INT_SDMMC1)
-		enable_irq_wake(host->irq);
-#endif
-
-	if (host->ops && host->ops->suspend)
-		ret = host->ops->suspend(host, state);
-	if (ret) {
-		dev_err(&dev->dev, "suspend hook failed, error = %d\n", ret);
-		sdhci_resume_host(host);
-#if defined (CONFIG_MACH_STAR) //                                                           
-	if(host->irq == INT_SDMMC1)
-		disable_irq_wake(host->irq);
-#endif
-	}
-
-	return ret;
+	return sdhci_suspend_host(host, state);
 }
 
 static int sdhci_pltfm_resume(struct platform_device *dev)
 {
 	struct sdhci_host *host = platform_get_drvdata(dev);
-	int ret = 0;
 
-#if defined (CONFIG_MACH_STAR) //                                                                     
-	if(host->irq==INT_SDMMC1)
-		disable_irq_wake(host->irq);
-#endif
-
-
-	if (host->ops && host->ops->resume)
-		ret = host->ops->resume(host);
-	if (ret) {
-		dev_err(&dev->dev, "resume hook failed, error = %d\n", ret);
-		return ret;
-	}
-
-	ret = sdhci_resume_host(host);
-	if (ret)
-		dev_err(&dev->dev, "resume failed, error = %d\n", ret);
-
-	return ret;
+	return sdhci_resume_host(host);
 }
 #else
 #define sdhci_pltfm_suspend	NULL

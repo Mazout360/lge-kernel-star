@@ -493,9 +493,6 @@ static void adjust_quirks(struct us_data *us)
 		case 'n':
 			f |= US_FL_INITIAL_READ10;
 			break;
-		case 'n':
-			f |= US_FL_INITIAL_READ10;
-			break;
 		case 'o':
 			f |= US_FL_CAPACITY_OK;
 			break;

@@ -91,9 +91,9 @@ struct acm {
 	unsigned int country_code_size;			/* size of this buffer */
 	unsigned int country_rel_date;			/* release date of version */
 	struct acm_wb wb[ACM_NW];
-    unsigned long read_urbs_free;
-    struct urb *read_urbs[ACM_NR];
-    struct acm_rb read_buffers[ACM_NR];
+	unsigned long read_urbs_free;
+	struct urb *read_urbs[ACM_NR];
+	struct acm_rb read_buffers[ACM_NR];
 	int rx_buflimit;
 	int rx_endpoint;
 	spinlock_t read_lock;
@@ -113,12 +113,10 @@ struct acm {
 	unsigned int susp_count;			/* number of suspended interfaces */
 	unsigned int combined_interfaces:1;		/* control and data collapsed */
 	unsigned int is_int_ep:1;			/* interrupt endpoints contrary to spec used */
-    unsigned int throttled:1;			/* actually throttled */
-    unsigned int throttle_req:1;			/* throttle requested */
-	unsigned int no_hangup_in_reset_resume:1;	/* do not call tty_hangup in acm_reset_resume */
+	unsigned int throttled:1;			/* actually throttled */
+	unsigned int throttle_req:1;			/* throttle requested */
 	u8 bInterval;
 	struct acm_wb *delayed_wb;			/* write queued for a device about to be woken */
-	struct usb_anchor	deferred;
 };
 
 #define CDC_DATA_INTERFACE_TYPE	0x0a
@@ -129,5 +127,3 @@ struct acm {
 #define NO_CAP_LINE			4
 #define NOT_A_MODEM			8
 #define NO_DATA_INTERFACE		16
-#define NOT_REAL_ACM			32
-#define NO_HANGUP_IN_RESET_RESUME	64

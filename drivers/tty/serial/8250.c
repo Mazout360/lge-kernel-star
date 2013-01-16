@@ -1441,22 +1441,6 @@ static void serial8250_enable_ms(struct uart_port *port)
 	serial_out(up, UART_IER, up->ier);
 }
 
-/* Clear the rx fifo */
-static void clear_rx_fifo(struct uart_8250_port *up)
-{
-	unsigned int status, tmout = 10000;
-	do {
-		status = serial_in(up, UART_LSR);
-		if (status & (UART_LSR_FIFOE | UART_LSR_BRK_ERROR_BITS))
-			status = serial_in(up, UART_RX);
-		else
-			break;
-		if (--tmout == 0)
-			break;
-		udelay(1);
-	} while (1);
-}
-
 /*
  * Clear the Tegra rx fifo after a break
  *

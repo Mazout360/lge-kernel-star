@@ -408,8 +408,6 @@ void l2cap_send_cmd(struct l2cap_conn *conn, u8 ident, u8 code, u16 len, void *d
 	else
 		flags = ACL_START;
 
-	bt_cb(skb)->force_active = BT_POWER_FORCE_ACTIVE_ON;
-
 	hci_send_acl(conn->hcon, skb, flags);
 }
 
@@ -463,48 +461,47 @@ static inline void l2cap_send_sframe(struct l2cap_chan *chan, u16 control)
 	else
 		flags = ACL_START;
 
-	bt_cb(skb)->force_active = pi->force_active;
 	hci_send_acl(chan->conn->hcon, skb, flags);
 }
 
 static inline void l2cap_send_rr_or_rnr(struct l2cap_chan *chan, u16 control)
 {
-    if (chan->conn_state & L2CAP_CONN_LOCAL_BUSY) {
-  		control |= L2CAP_SUPER_RCV_NOT_READY;
-        chan->conn_state |= L2CAP_CONN_RNR_SENT;
-  	} else
-  		control |= L2CAP_SUPER_RCV_READY;
-    
-    control |= chan->buffer_seq << L2CAP_CTRL_REQSEQ_SHIFT;
-    
-    l2cap_send_sframe(chan, control);
+	if (chan->conn_state & L2CAP_CONN_LOCAL_BUSY) {
+		control |= L2CAP_SUPER_RCV_NOT_READY;
+		chan->conn_state |= L2CAP_CONN_RNR_SENT;
+	} else
+		control |= L2CAP_SUPER_RCV_READY;
+
+	control |= chan->buffer_seq << L2CAP_CTRL_REQSEQ_SHIFT;
+
+	l2cap_send_sframe(chan, control);
 }
 
 static inline int __l2cap_no_conn_pending(struct l2cap_chan *chan)
 {
-    return !(chan->conf_state & L2CAP_CONF_CONNECT_PEND);
+	return !(chan->conf_state & L2CAP_CONF_CONNECT_PEND);
 }
 
 static void l2cap_do_start(struct l2cap_chan *chan)
 {
-    struct l2cap_conn *conn = chan->conn;
-    
-  	if (conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_SENT) {
-  		if (!(conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_DONE))
-  			return;
-        
-        if (l2cap_check_security(chan) &&
-                    __l2cap_no_conn_pending(chan)) {
-  			struct l2cap_conn_req req;
-            req.scid = cpu_to_le16(chan->scid);
-            req.psm  = chan->psm;
-            
-            chan->ident = l2cap_get_ident(conn);
-            chan->conf_state |= L2CAP_CONF_CONNECT_PEND;
-            
-            l2cap_send_cmd(conn, chan->ident, L2CAP_CONN_REQ,
-                                       sizeof(req), &req);
-  		}
+	struct l2cap_conn *conn = chan->conn;
+
+	if (conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_SENT) {
+		if (!(conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_DONE))
+			return;
+
+		if (l2cap_check_security(chan) &&
+				__l2cap_no_conn_pending(chan)) {
+			struct l2cap_conn_req req;
+			req.scid = cpu_to_le16(chan->scid);
+			req.psm  = chan->psm;
+
+			chan->ident = l2cap_get_ident(conn);
+			chan->conf_state |= L2CAP_CONF_CONNECT_PEND;
+
+			l2cap_send_cmd(conn, chan->ident, L2CAP_CONN_REQ,
+							sizeof(req), &req);
+		}
 	} else {
 		struct l2cap_info_req req;
 		req.type = cpu_to_le16(L2CAP_IT_FEAT_MASK);
@@ -585,38 +582,38 @@ static void l2cap_conn_start(struct l2cap_conn *conn)
 			struct l2cap_conn_req req;
 
 			if (!l2cap_check_security(chan) ||
-                !__l2cap_no_conn_pending(chan)) {
+					!__l2cap_no_conn_pending(chan)) {
 				bh_unlock_sock(sk);
 				continue;
 			}
 
 			if (!l2cap_mode_supported(chan->mode,
-                                      conn->feat_mask)
-                && chan->conf_state &
-                L2CAP_CONF_STATE2_DEVICE) {
-                /* __l2cap_sock_close() calls list_del(chan)
-                * so release the lock */
-                read_unlock_bh(&conn->chan_lock);
-                __l2cap_sock_close(sk, ECONNRESET);
-                read_lock_bh(&conn->chan_lock);
-  				bh_unlock_sock(sk);
+					conn->feat_mask)
+					&& chan->conf_state &
+					L2CAP_CONF_STATE2_DEVICE) {
+				/* __l2cap_sock_close() calls list_del(chan)
+				 * so release the lock */
+				read_unlock_bh(&conn->chan_lock);
+				 __l2cap_sock_close(sk, ECONNRESET);
+				read_lock_bh(&conn->chan_lock);
+				bh_unlock_sock(sk);
 				continue;
 			}
 
 			req.scid = cpu_to_le16(chan->scid);
-            req.psm  = chan->psm;
+			req.psm  = chan->psm;
 
 			chan->ident = l2cap_get_ident(conn);
-            chan->conf_state |= L2CAP_CONF_CONNECT_PEND;
+			chan->conf_state |= L2CAP_CONF_CONNECT_PEND;
 
 			l2cap_send_cmd(conn, chan->ident, L2CAP_CONN_REQ,
-                           sizeof(req), &req);
+							sizeof(req), &req);
 
 		} else if (sk->sk_state == BT_CONNECT2) {
 			struct l2cap_conn_rsp rsp;
 			char buf[128];
 			rsp.scid = cpu_to_le16(chan->dcid);
-            rsp.dcid = cpu_to_le16(chan->scid);
+			rsp.dcid = cpu_to_le16(chan->scid);
 
 			if (l2cap_check_security(chan)) {
 				if (bt_sk(sk)->defer_setup) {
@@ -624,7 +621,7 @@ static void l2cap_conn_start(struct l2cap_conn *conn)
 					rsp.result = cpu_to_le16(L2CAP_CR_PEND);
 					rsp.status = cpu_to_le16(L2CAP_CS_AUTHOR_PEND);
 					if (parent)
-                        parent->sk_data_ready(parent, 0);
+						parent->sk_data_ready(parent, 0);
 
 				} else {
 					sk->sk_state = BT_CONFIG;
@@ -948,10 +945,10 @@ int l2cap_chan_connect(struct l2cap_chan *chan)
 	auth_type = l2cap_get_auth_type(chan);
 
 	if (chan->dcid == L2CAP_CID_LE_DATA)
-		hcon = hci_connect(hdev, LE_LINK, 0, dst,
+		hcon = hci_connect(hdev, LE_LINK, dst,
 					chan->sec_level, auth_type);
 	else
-		hcon = hci_connect(hdev, ACL_LINK, 0, dst,
+		hcon = hci_connect(hdev, ACL_LINK, dst,
 					chan->sec_level, auth_type);
 
 	if (IS_ERR(hcon)) {
@@ -1093,7 +1090,6 @@ void l2cap_do_send(struct l2cap_chan *chan, struct sk_buff *skb)
 	else
 		flags = ACL_START;
 
-	bt_cb(skb)->force_active = pi->force_active;
 	hci_send_acl(hcon, skb, flags);
 }
 

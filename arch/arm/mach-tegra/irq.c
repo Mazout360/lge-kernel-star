@@ -23,15 +23,12 @@
 #include <linux/io.h>
 #include <linux/syscore_ops.h>
 
-#include <asm/hardware/gic.h>
-
-#include <mach/iomap.h>
-
 #include "board.h"
 #include "pm-irq.h"
 #include <asm/hardware/gic.h>
 
 #include <mach/iomap.h>
+#include <mach/legacy_irq.h>
 
 #include "board.h"
 
@@ -138,4 +135,15 @@ void __init tegra_init_irq(void)
     
   	gic_init(0, 29, IO_ADDRESS(TEGRA_ARM_INT_DIST_BASE),
              IO_ADDRESS(TEGRA_ARM_PERIF_BASE + 0x100));
+}
+
+void tegra_init_legacy_irq_cop(void)
+{
+	int i;
+    
+	for (i = 0; i < NUM_ICTLRS; i++) {
+		void __iomem *ictlr = ictlr_reg_base[i];
+		writel(~0, ictlr + ICTLR_COP_IER_CLR);
+		writel(0, ictlr + ICTLR_COP_IEP_CLASS);
+	}
 }

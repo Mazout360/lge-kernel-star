@@ -174,7 +174,8 @@ struct regulator_consumer_supply {
  * @driver_data: Data passed to regulator_init.
  */
 struct regulator_init_data {
-	const char *supply_regulator;        /* or NULL for system supply */
+    const char *supply_regulator;        /* or NULL for system supply */
+	struct device *supply_regulator_dev; /* or NULL for system supply */
 
 	struct regulation_constraints constraints;
 

@@ -296,28 +296,28 @@ struct l2cap_chan {
 	__u16		flush_to;
 	__u8		mode;
 
-    __le16		sport;
-    
+	__le16		sport;
+
 	__u8		sec_level;
 	__u8		role_switch;
 	__u8		force_reliable;
 	__u8		flushable;
-    
-    __u8		ident;
-	__u8		force_active;
+
+	__u8		ident;
 
 	__u8		conf_req[64];
 	__u8		conf_len;
-    __u8		num_conf_req;
-    __u8		num_conf_rsp;
-    
-    __u8		fcs;
-    
-    __u8		tx_win;
-    __u8		max_tx;
-    __u16		retrans_timeout;
-    __u16		monitor_timeout;
-    __u16		mps;
+	__u8		num_conf_req;
+	__u8		num_conf_rsp;
+
+	__u8		fcs;
+
+	__u8		tx_win;
+	__u8		max_tx;
+	__u16		retrans_timeout;
+	__u16		monitor_timeout;
+	__u16		mps;
+
 	__u8		conf_state;
 	__u16		conn_state;
 

@@ -1,0 +1,1 @@
+cmd_drivers/staging/zram/built-in.o :=  ../../arm-eabi-4.6/bin/arm-eabi-ld -EL    -r -o drivers/staging/zram/built-in.o drivers/staging/zram/xvmalloc.o ; scripts/mod/modpost drivers/staging/zram/built-in.o

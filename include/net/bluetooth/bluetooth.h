@@ -69,13 +69,6 @@ struct bt_security {
 #define BT_FLUSHABLE_OFF	0
 #define BT_FLUSHABLE_ON		1
 
-#define BT_POWER	9
-struct bt_power {
-	__u8 force_active;
-};
-#define BT_POWER_FORCE_ACTIVE_OFF 0
-#define BT_POWER_FORCE_ACTIVE_ON  1
-
 #define BT_INFO(fmt, arg...) printk(KERN_INFO "Bluetooth: " fmt "\n" , ## arg)
 #define BT_ERR(fmt, arg...)  printk(KERN_ERR "%s: " fmt "\n" , __func__ , ## arg)
 #define BT_DBG(fmt, arg...)  pr_debug("%s: " fmt "\n" , __func__ , ## arg)
@@ -157,7 +150,6 @@ struct bt_skb_cb {
 	__u8 retries;
 	__u8 sar;
 	unsigned short channel;
-	__u8 force_active;
 };
 #define bt_cb(skb) ((struct bt_skb_cb *)((skb)->cb))
 

@@ -137,23 +137,22 @@ cifs_reconnect(struct TCP_Server_Info *server)
 
 	/* mark submitted MIDs for retry and issue callback */
 	INIT_LIST_HEAD(&retry_list);
-    cFYI(1, "%s: moving mids to private list", __func__);
+	cFYI(1, "%s: moving mids to private list", __func__);
 	spin_lock(&GlobalMid_Lock);
 	list_for_each_safe(tmp, tmp2, &server->pending_mid_q) {
 		mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
 		if (mid_entry->midState == MID_REQUEST_SUBMITTED)
 			mid_entry->midState = MID_RETRY_NEEDED;
-            list_move(&mid_entry->qhead, &retry_list);
-        }
-    spin_unlock(&GlobalMid_Lock);
-    
-    cFYI(1, "%s: issuing mid callbacks", __func__);
-    list_for_each_safe(tmp, tmp2, &retry_list) {
-        mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
+		list_move(&mid_entry->qhead, &retry_list);
+	}
+	spin_unlock(&GlobalMid_Lock);
+
+	cFYI(1, "%s: issuing mid callbacks", __func__);
+	list_for_each_safe(tmp, tmp2, &retry_list) {
+		mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
 		list_del_init(&mid_entry->qhead);
 		mid_entry->callback(mid_entry);
 	}
-	spin_unlock(&GlobalMid_Lock);
 
 	do {
 		try_to_freeze();
@@ -632,7 +631,7 @@ multi_t2_fnd:
 		spin_unlock(&GlobalMid_Lock);
 
 		if (mid_entry != NULL) {
-            mid_entry->callback(mid_entry);
+			mid_entry->callback(mid_entry);
 			/* Was previous buf put in mpx struct for multi-rsp? */
 			if (!isMultiRsp) {
 				/* smb buffer will be freed by user thread */
@@ -692,27 +691,29 @@ multi_t2_fnd:
 	}
 	/* buffer usually freed in free_mid - need to free it here on exit */
 	cifs_buf_release(bigbuf);
-	
-    if (!list_empty(&server->pending_mid_q)) {
-        struct list_head dispose_list;
-        
-        INIT_LIST_HEAD(&dispose_list);
-  		spin_lock(&GlobalMid_Lock);
-  		list_for_each_safe(tmp, tmp2, &server->pending_mid_q) {
-  			mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
-            cFYI(1, "Clearing mid 0x%x", mid_entry->mid);
-            mid_entry->midState = MID_SHUTDOWN;
-            list_move(&mid_entry->qhead, &dispose_list);
-        }
-        spin_unlock(&GlobalMid_Lock);
-        
-        /* now walk dispose list and issue callbacks */
-        list_for_each_safe(tmp, tmp2, &dispose_list) {
-            mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
-            cFYI(1, "Callback mid 0x%x", mid_entry->mid);
-  			list_del_init(&mid_entry->qhead);
-  			mid_entry->callback(mid_entry);
-  		}
+	if (smallbuf) /* no sense logging a debug message if NULL */
+		cifs_small_buf_release(smallbuf);
+
+	if (!list_empty(&server->pending_mid_q)) {
+		struct list_head dispose_list;
+
+		INIT_LIST_HEAD(&dispose_list);
+		spin_lock(&GlobalMid_Lock);
+		list_for_each_safe(tmp, tmp2, &server->pending_mid_q) {
+			mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
+			cFYI(1, "Clearing mid 0x%x", mid_entry->mid);
+			mid_entry->midState = MID_SHUTDOWN;
+			list_move(&mid_entry->qhead, &dispose_list);
+		}
+		spin_unlock(&GlobalMid_Lock);
+
+		/* now walk dispose list and issue callbacks */
+		list_for_each_safe(tmp, tmp2, &dispose_list) {
+			mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
+			cFYI(1, "Callback mid 0x%x", mid_entry->mid);
+			list_del_init(&mid_entry->qhead);
+			mid_entry->callback(mid_entry);
+		}
 		/* 1/8th of sec is more than enough time for them to exit */
 		msleep(125);
 	}
@@ -785,7 +786,7 @@ cifs_parse_mount_options(const char *mountdata, const char *devname,
 			 struct smb_vol *vol)
 {
 	char *value, *data, *end;
-    char *mountdata_copy = NULL, *options;
+	char *mountdata_copy = NULL, *options;
 	unsigned int  temp_len, i, j;
 	char separator[2];
 	short int override_uid = -1;
@@ -826,13 +827,13 @@ cifs_parse_mount_options(const char *mountdata, const char *devname,
 	vol->actimeo = CIFS_DEF_ACTIMEO;
 
 	if (!mountdata)
-        goto cifs_parse_mount_err;
-    
-    mountdata_copy = kstrndup(mountdata, PAGE_SIZE, GFP_KERNEL);
-    if (!mountdata_copy)
-        goto cifs_parse_mount_err;
-    
-    options = mountdata_copy;
+		goto cifs_parse_mount_err;
+
+	mountdata_copy = kstrndup(mountdata, PAGE_SIZE, GFP_KERNEL);
+	if (!mountdata_copy)
+		goto cifs_parse_mount_err;
+
+	options = mountdata_copy;
 	end = options + strlen(options);
 	if (strncmp(options, "sep=", 4) == 0) {
 		if (options[4] != 0) {
@@ -841,7 +842,7 @@ cifs_parse_mount_options(const char *mountdata, const char *devname,
 		} else {
 			cFYI(1, "Null separator not allowed");
 		}
-	} while (server->tcpStatus == CifsNeedReconnect);
+	}
 
 	while ((data = strsep(&options, separator)) != NULL) {
 		if (!*data)
@@ -2596,9 +2597,6 @@ void reset_cifs_unix_caps(int xid, struct cifs_tcon *tcon,
 		if (cap & CIFS_UNIX_TRANSPORT_ENCRYPTION_MANDATORY_CAP)
 			cERROR(1, "per-share encryption not supported yet");
 
-		if (cap & CIFS_UNIX_TRANSPORT_ENCRYPTION_MANDATORY_CAP)
-			cERROR(1, "per-share encryption not supported yet");
-
 		cap &= CIFS_UNIX_CAP_MASK;
 		if (vol_info && vol_info->no_psx_acl)
 			cap &= ~CIFS_UNIX_POSIX_ACL_CAP;
@@ -2685,13 +2683,14 @@ void cifs_setup_cifs_sb(struct smb_vol *pvolume_info,
 		/* Windows ME may prefer this */
 		cFYI(1, "readsize set to minimum: 2048");
 	}
-	
-    /*
-    * Temporarily set wsize for matching superblock. If we end up using
-    * new sb then cifs_negotiate_wsize will later negotiate it downward
-     * if needed.
-    */
-    cifs_sb->wsize = pvolume_info->wsize;
+
+	/*
+	 * Temporarily set wsize for matching superblock. If we end up using
+	 * new sb then cifs_negotiate_wsize will later negotiate it downward
+	 * if needed.
+	 */
+	cifs_sb->wsize = pvolume_info->wsize;
+
 	cifs_sb->mnt_uid = pvolume_info->linux_uid;
 	cifs_sb->mnt_gid = pvolume_info->linux_gid;
 	cifs_sb->mnt_file_mode = pvolume_info->file_mode;
@@ -2753,48 +2752,6 @@ void cifs_setup_cifs_sb(struct smb_vol *pvolume_info,
 	if ((pvolume_info->cifs_acl) && (pvolume_info->dynperm))
 		cERROR(1, "mount option dynperm ignored if cifsacl "
 			   "mount option supported");
-}
-
-/* Prior to 3.0, cifs couldn't handle writes larger than this */
-#define CIFS_MAX_WSIZE (PAGEVEC_SIZE * PAGE_CACHE_SIZE)
-
-/*
- * When the server doesn't allow large posix writes, only allow a wsize of
- * 128k minus the size of the WRITE_AND_X header. That allows for a write up
- * to the maximum size described by RFC1002.
- */
-#define CIFS_MAX_RFC1002_WSIZE (128 * 1024 - sizeof(WRITE_REQ) + 4)
-
-/* Make the default the same as the max */
-#define CIFS_DEFAULT_WSIZE CIFS_MAX_WSIZE
-
-static unsigned int
-cifs_negotiate_wsize(struct cifsTconInfo *tcon, struct smb_vol *pvolume_info)
-{
-	__u64 unix_cap = le64_to_cpu(tcon->fsUnixInfo.Capability);
-	struct TCP_Server_Info *server = tcon->ses->server;
-	unsigned int wsize = pvolume_info->wsize ? pvolume_info->wsize :
-				CIFS_DEFAULT_WSIZE;
-
-	/* can server support 24-bit write sizes? (via UNIX extensions) */
-	if (!tcon->unix_ext || !(unix_cap & CIFS_UNIX_LARGE_WRITE_CAP))
-		wsize = min_t(unsigned int, wsize, CIFS_MAX_RFC1002_WSIZE);
-
-	/*
-	 * no CAP_LARGE_WRITE_X or is signing enabled without CAP_UNIX set?
-	 * Limit it to max buffer offered by the server, minus the size of the
-	 * WRITEX header, not including the 4 byte RFC1001 length.
-	 */
-	if (!(server->capabilities & CAP_LARGE_WRITE_X) ||
-	    (!(server->capabilities & CAP_UNIX) &&
-	     (server->secMode & (SECMODE_SIGN_ENABLED|SECMODE_SIGN_REQUIRED))))
-		wsize = min_t(unsigned int, wsize,
-				server->maxBuf - sizeof(WRITE_REQ) + 4);
-
-	/* hard limit of CIFS_MAX_WSIZE */
-	wsize = min_t(unsigned int, wsize, CIFS_MAX_WSIZE);
-
-	return wsize;
 }
 
 /*
@@ -3112,7 +3069,7 @@ try_mount_again:
 	if (tcon->ses->capabilities & CAP_UNIX) {
 		/* reset of caps checks mount to see if unix extensions
 		   disabled for just this mount */
-		reset_cifs_unix_caps(xid, tcon, sb, volume_info);
+		reset_cifs_unix_caps(xid, tcon, cifs_sb, volume_info);
 		if ((tcon->ses->server->tcpStatus == CifsNeedReconnect) &&
 		    (le64_to_cpu(tcon->fsUnixInfo.Capability) &
 		     CIFS_UNIX_TRANSPORT_ENCRYPTION_MANDATORY_CAP)) {
@@ -3128,10 +3085,6 @@ try_mount_again:
 		CIFSSMBQFSAttributeInfo(xid, tcon);
 	}
 
-	/* convert forward to back slashes in prepath here if needed */
-	if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS) == 0)
-		convert_delimiter(cifs_sb->prepath, CIFS_DIR_SEP(cifs_sb));
-
 	if ((tcon->unix_ext == 0) && (cifs_sb->rsize > (1024 * 127))) {
 		cifs_sb->rsize = 1024 * 127;
 		cFYI(DBG2, "no very large read support, rsize now 127K");
@@ -3144,23 +3097,24 @@ try_mount_again:
 
 remote_path_check:
 #ifdef CONFIG_CIFS_DFS_UPCALL
-    /*
-         * Perform an unconditional check for whether there are DFS
-         * referrals for this path without prefix, to provide support
-         * for DFS referrals from w2k8 servers which don't seem to respond
-         * with PATH_NOT_COVERED to requests that include the prefix.
-         * Chase the referral if found, otherwise continue normally.
-         */
-    if (referral_walks_count == 0) {
-        int refrc = expand_dfs_referral(xid, pSesInfo, volume_info,
-                                                cifs_sb, false);
-        if (!refrc) {
-            referral_walks_count++;
-            goto try_mount_again;
-        }
-    }
+	/*
+	 * Perform an unconditional check for whether there are DFS
+	 * referrals for this path without prefix, to provide support
+	 * for DFS referrals from w2k8 servers which don't seem to respond
+	 * with PATH_NOT_COVERED to requests that include the prefix.
+	 * Chase the referral if found, otherwise continue normally.
+	 */
+	if (referral_walks_count == 0) {
+		int refrc = expand_dfs_referral(xid, pSesInfo, volume_info,
+						cifs_sb, false);
+		if (!refrc) {
+			referral_walks_count++;
+			goto try_mount_again;
+		}
+	}
 #endif
-	/* check if a whole path (including prepath) is not remote */
+
+	/* check if a whole path is not remote */
 	if (!rc && tcon) {
 		/* build_path_to_root works only when we have a valid tcon */
 		full_path = cifs_build_path_to_root(volume_info, cifs_sb, tcon);

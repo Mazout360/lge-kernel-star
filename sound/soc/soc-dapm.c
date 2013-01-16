@@ -62,48 +62,21 @@ static int dapm_up_seq[] = {
 	[snd_soc_dapm_dac] = 6,
 	[snd_soc_dapm_mixer] = 7,
 	[snd_soc_dapm_mixer_named_ctl] = 7,
-//                                                          
-#if defined (CONFIG_MACH_STAR) || defined (CONFIG_MACH_BSSQ)
-//                                                                 
-#if 0 /* Wolfson Mark patch */
 	[snd_soc_dapm_pga] = 8,
 	[snd_soc_dapm_adc] = 9,
 	[snd_soc_dapm_out_drv] = 10,
 	[snd_soc_dapm_hp] = 10,
 	[snd_soc_dapm_spk] = 10,
 	[snd_soc_dapm_post] = 11,
-#else
-	[snd_soc_dapm_adc] = 8,
-	[snd_soc_dapm_pga] = 10,
-	[snd_soc_dapm_hp] = 11,
-	[snd_soc_dapm_spk] = 11,
-	[snd_soc_dapm_post] = 12,
-#endif
-//                                                                 
-#endif
-//                                                          
 };
 
 static int dapm_down_seq[] = {
 	[snd_soc_dapm_pre] = 0,
-//                                                          
-#if defined (CONFIG_MACH_STAR) || defined (CONFIG_MACH_BSSQ)
-//                                                                 
-#if 0 /* Wolfson Mark patch */
 	[snd_soc_dapm_adc] = 1,
 	[snd_soc_dapm_hp] = 2,
 	[snd_soc_dapm_spk] = 2,
 	[snd_soc_dapm_out_drv] = 2,
 	[snd_soc_dapm_pga] = 4,
-#else
-	[snd_soc_dapm_hp] = 1,
-	[snd_soc_dapm_spk] = 1,
-	[snd_soc_dapm_pga] = 2,
-	[snd_soc_dapm_adc] = 4,
-#endif
-//                                                                 
-#endif
-//                                                          
 	[snd_soc_dapm_mixer_named_ctl] = 5,
 	[snd_soc_dapm_mixer] = 5,
 	[snd_soc_dapm_dac] = 6,
@@ -117,11 +90,7 @@ static int dapm_down_seq[] = {
 	[snd_soc_dapm_supply] = 11,
 	[snd_soc_dapm_post] = 12,
 };
-//                                                       
-//                                       
-static DEFINE_MUTEX(soc_dapm_seq_mutex); 
-//                                     
-//                                                       
+
 static void pop_wait(u32 pop_time)
 {
 	if (pop_time)
@@ -356,40 +325,42 @@ static int dapm_connect_mixer(struct snd_soc_dapm_context *dapm,
 }
 
 static int dapm_is_shared_kcontrol(struct snd_soc_dapm_context *dapm,
-                                   struct snd_soc_dapm_widget *kcontrolw,
-                                   const struct snd_kcontrol_new *kcontrol_new,
-                                   struct snd_kcontrol **kcontrol)
+	struct snd_soc_dapm_widget *kcontrolw,
+	const struct snd_kcontrol_new *kcontrol_new,
+	struct snd_kcontrol **kcontrol)
 {
-    struct snd_soc_dapm_widget *w;
-    int i;
-    
-    *kcontrol = NULL;
-    
-    list_for_each_entry(w, &dapm->card->widgets, list) {
-        if (w == kcontrolw || w->dapm != kcontrolw->dapm)
-            continue;
-        for (i = 0; i < w->num_kcontrols; i++) {
-            if (&w->kcontrol_news[i] == kcontrol_new) {
-                if (w->kcontrols)
-                    *kcontrol = w->kcontrols[i];
-                return 1;
-                }
-        }
-  	}
-    return 0;
+	struct snd_soc_dapm_widget *w;
+	int i;
+
+	*kcontrol = NULL;
+
+	list_for_each_entry(w, &dapm->card->widgets, list) {
+		if (w == kcontrolw || w->dapm != kcontrolw->dapm)
+			continue;
+		for (i = 0; i < w->num_kcontrols; i++) {
+			if (&w->kcontrol_news[i] == kcontrol_new) {
+				if (w->kcontrols)
+					*kcontrol = w->kcontrols[i];
+				return 1;
+			}
+		}
+	}
+
+	return 0;
 }
 
 /* create new dapm mixer control */
-+ static int dapm_new_mixer(struct snd_soc_dapm_widget *w)
+static int dapm_new_mixer(struct snd_soc_dapm_widget *w)
 {
-    + 	struct snd_soc_dapm_context *dapm = w->dapm;
-  	int i, ret = 0;
-  	size_t name_len, prefix_len;
-  	struct snd_soc_dapm_path *path;
-  	struct snd_card *card = dapm->card->snd_card;
-  	const char *prefix;
-    + 	struct snd_soc_dapm_widget_list *wlist;
-    + 	size_t wlistsize;
+	struct snd_soc_dapm_context *dapm = w->dapm;
+	int i, ret = 0;
+	size_t name_len, prefix_len;
+	struct snd_soc_dapm_path *path;
+	struct snd_card *card = dapm->card->snd_card;
+	const char *prefix;
+	struct snd_soc_dapm_widget_list *wlist;
+	size_t wlistsize;
+
 	if (dapm->codec)
 		prefix = dapm->codec->name_prefix;
 	else
@@ -447,124 +418,124 @@ static int dapm_is_shared_kcontrol(struct snd_soc_dapm_context *dapm,
 				 * for widgets so cut the prefix off
 				 * the front of the widget name.
 				 */
-                    snprintf(path->long_name, name_len, "%s %s",
-                             w->name + prefix_len,
-                             w->kcontrol_news[i].name);
-                    break;
-                case snd_soc_dapm_mixer_named_ctl:
-                    snprintf(path->long_name, name_len, "%s",
-                             w->kcontrol_news[i].name);
-                    break;
-  			}
-            
-  			path->long_name[name_len - 1] = '\0';
-            
-            path->kcontrol = snd_soc_cnew(&w->kcontrol_news[i],
-                                                      wlist, path->long_name,
-                                                      prefix);
-  			ret = snd_ctl_add(card, path->kcontrol);
-  			if (ret < 0) {
-  				dev_err(dapm->dev,
-                        "asoc: failed to add dapm kcontrol %s: %d\n",
-                        path->long_name, ret);
-                kfree(wlist);
-  				kfree(path->long_name);
-  				path->long_name = NULL;
-  				return ret;
-  			}
-            w->kcontrols[i] = path->kcontrol;
-  		}
-  	}
-  	return ret;
+				snprintf(path->long_name, name_len, "%s %s",
+					 w->name + prefix_len,
+					 w->kcontrol_news[i].name);
+				break;
+			case snd_soc_dapm_mixer_named_ctl:
+				snprintf(path->long_name, name_len, "%s",
+					 w->kcontrol_news[i].name);
+				break;
+			}
+
+			path->long_name[name_len - 1] = '\0';
+
+			path->kcontrol = snd_soc_cnew(&w->kcontrol_news[i],
+						      wlist, path->long_name,
+						      prefix);
+			ret = snd_ctl_add(card, path->kcontrol);
+			if (ret < 0) {
+				dev_err(dapm->dev,
+					"asoc: failed to add dapm kcontrol %s: %d\n",
+					path->long_name, ret);
+				kfree(wlist);
+				kfree(path->long_name);
+				path->long_name = NULL;
+				return ret;
+			}
+			w->kcontrols[i] = path->kcontrol;
+		}
+	}
+	return ret;
 }
 
 /* create new dapm mux control */
 static int dapm_new_mux(struct snd_soc_dapm_widget *w)
 {
-    struct snd_soc_dapm_context *dapm = w->dapm;
-  	struct snd_soc_dapm_path *path = NULL;
-  	struct snd_kcontrol *kcontrol;
-  	struct snd_card *card = dapm->card->snd_card;
-  	const char *prefix;
-  	size_t prefix_len;
-    int ret;
-    struct snd_soc_dapm_widget_list *wlist;
-    int shared, wlistentries;
-    size_t wlistsize;
-    char *name;
-    
-    if (w->num_kcontrols != 1) {
-        dev_err(dapm->dev,
-                        "asoc: mux %s has incorrect number of controls\n",
-                        w->name);
-  		return -EINVAL;
-  	}
-    
-    shared = dapm_is_shared_kcontrol(dapm, w, &w->kcontrol_news[0],
-                                         &kcontrol);
-    if (kcontrol) {
-        wlist = kcontrol->private_data;
-        wlistentries = wlist->num_widgets + 1;
-    } else {
-            wlist = NULL;
-            wlistentries = 1;
-        }
-    wlistsize = sizeof(struct snd_soc_dapm_widget_list) +
-    wlistentries * sizeof(struct snd_soc_dapm_widget *),
-    wlist = krealloc(wlist, wlistsize, GFP_KERNEL);
-    if (wlist == NULL) {
-        dev_err(dapm->dev,
-                        "asoc: can't allocate widget list for %s\n", w->name);
-        return -ENOMEM;
-    }
-    wlist->num_widgets = wlistentries;
-    wlist->widgets[wlistentries - 1] = w;
-    
-    if (!kcontrol) {
-        if (dapm->codec)
-            prefix = dapm->codec->name_prefix;
-        else
-            prefix = NULL;
-        
-        if (shared) {
-            name = w->kcontrol_news[0].name;
-            prefix_len = 0;
-            } else {
-                name = w->name;
-                if (prefix)
-                    prefix_len = strlen(prefix) + 1;
-                else
-                    prefix_len = 0;
-            }
-        
-         		/*
-                 * The control will get a prefix from the control creation
-                 * process but we're also using the same prefix for widgets so
-                 * cut the prefix off the front of the widget name.
-                 */
-        kcontrol = snd_soc_cnew(&w->kcontrol_news[0], wlist,
-                                        name + prefix_len, prefix);
-        ret = snd_ctl_add(card, kcontrol);
-        if (ret < 0) {
-            dev_err(dapm->dev,
-                                "asoc: failed to add kcontrol %s\n", w->name);
-            kfree(wlist);
-            return ret;
-        }
-    }
-    
-    kcontrol->private_data = wlist;
-    
-    w->kcontrols[0] = kcontrol;
-    
-  	list_for_each_entry(path, &w->sources, list_sink)
-    path->kcontrol = kcontrol;
-    
-    return 0;
+	struct snd_soc_dapm_context *dapm = w->dapm;
+	struct snd_soc_dapm_path *path = NULL;
+	struct snd_kcontrol *kcontrol;
+	struct snd_card *card = dapm->card->snd_card;
+	const char *prefix;
+	size_t prefix_len;
+	int ret;
+	struct snd_soc_dapm_widget_list *wlist;
+	int shared, wlistentries;
+	size_t wlistsize;
+	char *name;
+
+	if (w->num_kcontrols != 1) {
+		dev_err(dapm->dev,
+			"asoc: mux %s has incorrect number of controls\n",
+			w->name);
+		return -EINVAL;
+	}
+
+	shared = dapm_is_shared_kcontrol(dapm, w, &w->kcontrol_news[0],
+					 &kcontrol);
+	if (kcontrol) {
+		wlist = kcontrol->private_data;
+		wlistentries = wlist->num_widgets + 1;
+	} else {
+		wlist = NULL;
+		wlistentries = 1;
+	}
+	wlistsize = sizeof(struct snd_soc_dapm_widget_list) +
+		wlistentries * sizeof(struct snd_soc_dapm_widget *),
+	wlist = krealloc(wlist, wlistsize, GFP_KERNEL);
+	if (wlist == NULL) {
+		dev_err(dapm->dev,
+			"asoc: can't allocate widget list for %s\n", w->name);
+		return -ENOMEM;
+	}
+	wlist->num_widgets = wlistentries;
+	wlist->widgets[wlistentries - 1] = w;
+
+	if (!kcontrol) {
+		if (dapm->codec)
+			prefix = dapm->codec->name_prefix;
+		else
+			prefix = NULL;
+
+		if (shared) {
+			name = w->kcontrol_news[0].name;
+			prefix_len = 0;
+		} else {
+			name = w->name;
+			if (prefix)
+				prefix_len = strlen(prefix) + 1;
+			else
+				prefix_len = 0;
+		}
+
+		/*
+		 * The control will get a prefix from the control creation
+		 * process but we're also using the same prefix for widgets so
+		 * cut the prefix off the front of the widget name.
+		 */
+		kcontrol = snd_soc_cnew(&w->kcontrol_news[0], wlist,
+					name + prefix_len, prefix);
+		ret = snd_ctl_add(card, kcontrol);
+		if (ret < 0) {
+			dev_err(dapm->dev,
+				"asoc: failed to add kcontrol %s\n", w->name);
+			kfree(wlist);
+			return ret;
+		}
+	}
+
+	kcontrol->private_data = wlist;
+
+	w->kcontrols[0] = kcontrol;
+
+	list_for_each_entry(path, &w->sources, list_sink)
+		path->kcontrol = kcontrol;
+
+	return 0;
 }
 
 /* create new dapm volume control */
-+ static int dapm_new_pga(struct snd_soc_dapm_widget *w)
+static int dapm_new_pga(struct snd_soc_dapm_widget *w)
 {
 	if (w->num_kcontrols)
 		dev_err(w->dapm->dev,
@@ -1137,11 +1108,6 @@ static int dapm_power_widgets(struct snd_soc_dapm_context *dapm, int event)
 	LIST_HEAD(down_list);
 	LIST_HEAD(async_domain);
 	int power;
-//                                                        
-	//                                       
-	mutex_lock(&soc_dapm_seq_mutex); 
-	//                                     
-//                                                        
 
 	trace_snd_soc_dapm_start(card);
 
@@ -1246,11 +1212,6 @@ static int dapm_power_widgets(struct snd_soc_dapm_context *dapm, int event)
 		async_schedule_domain(dapm_post_sequence_async, d,
 					&async_domain);
 	async_synchronize_full_domain(&async_domain);
-//                                                        
-	//                                       
-	mutex_unlock(&soc_dapm_seq_mutex); 
-	//                                     
-//                                                        
 
 	pop_dbg(dapm->dev, card->pop_time,
 		"DAPM sequencing finished, waiting %dms\n", card->pop_time);
@@ -1531,7 +1492,6 @@ static ssize_t dapm_widget_show(struct device *dev,
 		case snd_soc_dapm_mixer:
 		case snd_soc_dapm_mixer_named_ctl:
 		case snd_soc_dapm_supply:
-
 			if (w->name)
 				count += sprintf(buf + count, "%s: %s\n",
 					w->name, w->power ? "On":"Off");
@@ -1852,13 +1812,14 @@ int snd_soc_dapm_new_widgets(struct snd_soc_dapm_context *dapm)
 		if (w->new)
 			continue;
 
-        if (w->num_kcontrols) {
-            w->kcontrols = kzalloc(w->num_kcontrols *
-                                               sizeof(struct snd_kcontrol *),
-                                               GFP_KERNEL);
-            if (!w->kcontrols)
-                return -ENOMEM;
-            }
+		if (w->num_kcontrols) {
+			w->kcontrols = kzalloc(w->num_kcontrols *
+						sizeof(struct snd_kcontrol *),
+						GFP_KERNEL);
+			if (!w->kcontrols)
+				return -ENOMEM;
+		}
+
 		switch(w->id) {
 		case snd_soc_dapm_switch:
 		case snd_soc_dapm_mixer:

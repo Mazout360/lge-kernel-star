@@ -164,9 +164,6 @@ struct sdhci_host {
 	wait_queue_head_t	buf_ready_int;	/* Waitqueue for Buffer Read Ready interrupt */
 	unsigned int		tuning_done;	/* Condition flag set when CMD19 succeeds */
 
-	wait_queue_head_t	buf_ready_int;	/* Waitqueue for Buffer Read Ready interrupt */
-	unsigned int		tuning_done;	/* Condition flag set when CMD19 succeeds */
-
 	unsigned int		tuning_count;	/* Timer count for re-tuning */
 	unsigned int		tuning_mode;	/* Re-tuning mode supported by host */
 #define SDHCI_TUNING_MODE_1	0

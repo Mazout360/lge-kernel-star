@@ -77,8 +77,6 @@ static int rtc_resume(struct device *dev)
 		return 0;
 	}
 	rtc_tm_to_time(&tm, &newtime);
-	if (delta_delta.tv_sec < -1)
-		newtime++;
 	if (newtime <= oldtime) {
 		if (newtime < oldtime)
 			pr_debug("%s:  time travel!\n", dev_name(&rtc->dev));

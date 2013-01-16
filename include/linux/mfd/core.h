@@ -32,6 +32,9 @@ struct mfd_cell {
 
 	int			(*suspend)(struct platform_device *dev);
 	int			(*resume)(struct platform_device *dev);
+    
+    /* mfd_data can be used to pass data to client drivers */
+	void			*mfd_data;
 
 	/* platform data passed to the sub devices drivers */
 	void			*platform_data;

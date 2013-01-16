@@ -3364,24 +3364,10 @@ static inline unsigned long wait_table_bits(unsigned long size)
 /*
  * Check if a pageblock contains reserved pages
  */
-static int pageblock_is_reserved(unsigned long start_pfn)
-{
-	unsigned long end_pfn = start_pfn + pageblock_nr_pages;
-	unsigned long pfn;
-
-	for (pfn = start_pfn; pfn < end_pfn; pfn++)
-		if (PageReserved(pfn_to_page(pfn)))
-			return 1;
-	return 0;
-}
-
-/*
- * Check if a pageblock contains reserved pages
- */
 static int pageblock_is_reserved(unsigned long start_pfn, unsigned long end_pfn)
 {
 	unsigned long pfn;
-
+    
 	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
 		if (!pfn_valid_within(pfn) || PageReserved(pfn_to_page(pfn)))
 			return 1;
@@ -3428,7 +3414,6 @@ static void setup_zone_migrate_reserve(struct zone *zone)
 			continue;
 
 		/* Blocks with reserved pages will never free, skip them. */
-        block_end_pfn = min(pfn + pageblock_nr_pages, end_pfn);
         if (pageblock_is_reserved(pfn, block_end_pfn))
 			continue;
 

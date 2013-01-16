@@ -621,7 +621,7 @@ static void dpm_drv_timeout(unsigned long data)
  * Execute the appropriate "resume" callback for all devices whose status
  * indicates that they are suspended.
  */
-static void dpm_resume(pm_message_t state)
+void dpm_resume(pm_message_t state)
 {
 	struct device *dev;
 	ktime_t starttime = ktime_get();
@@ -985,7 +985,7 @@ int dpm_suspend(pm_message_t state)
 	ktime_t starttime = ktime_get();
 	int error = 0;
     
-    might_sleep()
+    might_sleep();
 
 	mutex_lock(&dpm_list_mtx);
 	pm_transition = state;
@@ -1077,7 +1077,7 @@ int dpm_prepare(pm_message_t state)
 {
 	int error = 0;
     
-    might_sleep()
+    might_sleep();
 
 	mutex_lock(&dpm_list_mtx);
 	while (!list_empty(&dpm_list)) {

@@ -147,23 +147,6 @@ static void alarm_enqueue_locked(struct alarm *alarm)
 }
 
 /**
- * alarm_init - initialize an alarm
- * @alarm:	the alarm to be initialized
- * @type:	the alarm type to be used
- * @function:	alarm callback function
- */
-void alarm_init(struct alarm *alarm,
-	enum android_alarm_type type, void (*function)(struct alarm *))
-{
-	RB_CLEAR_NODE(&alarm->node);
-	alarm->type = type;
-	alarm->function = function;
-
-	pr_alarm(FLOW, "created alarm, type %d, func %pF\n", type, function);
-}
-
-
-/**
  * alarm_start_range - (re)start an alarm
  * @alarm:	the alarm to be added
  * @start:	earliest expiry time
@@ -220,23 +203,6 @@ int alarm_try_to_cancel(struct alarm *alarm)
 	return ret;
 }
 
-/**
- * alarm_cancel - cancel an alarm and wait for the handler to finish.
- * @alarm:	the alarm to be cancelled
- *
- * Returns:
- *  0 when the alarm was not active
- *  1 when the alarm was active
- */
-int alarm_cancel(struct alarm *alarm)
-{
-	for (;;) {
-		int ret = alarm_try_to_cancel(alarm);
-		if (ret >= 0)
-			return ret;
-		cpu_relax();
-	}
-}
 
 /**
  * alarm_set_rtc - set the kernel and rtc walltime

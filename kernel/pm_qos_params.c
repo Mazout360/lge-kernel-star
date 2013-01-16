@@ -203,16 +203,6 @@ static inline void pm_qos_set_value(struct pm_qos_object *o, s32 value)
 	o->target_value = value;
 }
 
-static inline s32 pm_qos_read_value(struct pm_qos_object *o)
-{
-	return o->target_value;
-}
-
-static inline void pm_qos_set_value(struct pm_qos_object *o, s32 value)
-{
-	o->target_value = value;
-}
-
 static void update_target(struct pm_qos_object *o, struct plist_node *node,
 			  int del, int value)
 {

@@ -437,7 +437,6 @@ static int l2cap_sock_getsockopt(struct socket *sock, int level, int optname, ch
 	struct sock *sk = sock->sk;
 	struct l2cap_chan *chan = l2cap_pi(sk)->chan;
 	struct bt_security sec;
-	struct bt_power pwr;
 	int len, err = 0;
 
 	BT_DBG("sk %p", sk);
@@ -482,21 +481,6 @@ static int l2cap_sock_getsockopt(struct socket *sock, int level, int optname, ch
 
 	case BT_FLUSHABLE:
 		if (put_user(chan->flushable, (u32 __user *) optval))
-			err = -EFAULT;
-
-		break;
-
-	case BT_POWER:
-		if (sk->sk_type != SOCK_SEQPACKET && sk->sk_type != SOCK_STREAM
-				&& sk->sk_type != SOCK_RAW) {
-			err = -EINVAL;
-			break;
-		}
-
-		pwr.force_active = l2cap_pi(sk)->force_active;
-
-		len = min_t(unsigned int, len, sizeof(pwr));
-		if (copy_to_user(optval, (char *) &pwr, len))
 			err = -EFAULT;
 
 		break;
@@ -601,7 +585,6 @@ static int l2cap_sock_setsockopt(struct socket *sock, int level, int optname, ch
 	struct sock *sk = sock->sk;
 	struct l2cap_chan *chan = l2cap_pi(sk)->chan;
 	struct bt_security sec;
-	struct bt_power pwr;
 	int len, err = 0;
 	u32 opt;
 
@@ -676,23 +659,6 @@ static int l2cap_sock_setsockopt(struct socket *sock, int level, int optname, ch
 		}
 
 		chan->flushable = opt;
-		break;
-
-	case BT_POWER:
-		if (sk->sk_type != SOCK_SEQPACKET && sk->sk_type != SOCK_STREAM
-				&& sk->sk_type != SOCK_RAW) {
-			err = -EINVAL;
-			break;
-		}
-
-		pwr.force_active = BT_POWER_FORCE_ACTIVE_ON;
-
-		len = min_t(unsigned int, sizeof(pwr), optlen);
-		if (copy_from_user((char *) &pwr, optval, len)) {
-			err = -EFAULT;
-			break;
-		}
-		l2cap_pi(sk)->force_active = pwr.force_active;
 		break;
 
 	default:
@@ -989,47 +955,47 @@ static void l2cap_sock_destruct(struct sock *sk)
 void l2cap_sock_init(struct sock *sk, struct sock *parent)
 {
 	struct l2cap_pinfo *pi = l2cap_pi(sk);
-    struct l2cap_chan *chan = pi->chan;
-    
-  	BT_DBG("sk %p", sk);
-    
-  	if (parent) {
-        struct l2cap_chan *pchan = l2cap_pi(parent)->chan;
-        
-  		sk->sk_type = parent->sk_type;
-  		bt_sk(sk)->defer_setup = bt_sk(parent)->defer_setup;
-        
-        chan->imtu = pchan->imtu;
-        chan->omtu = pchan->omtu;
-        chan->conf_state = pchan->conf_state;
-        chan->mode = pchan->mode;
-        chan->fcs  = pchan->fcs;
-        chan->max_tx = pchan->max_tx;
-        chan->tx_win = pchan->tx_win;
-        chan->sec_level = pchan->sec_level;
-        chan->role_switch = pchan->role_switch;
-        chan->force_reliable = pchan->force_reliable;
-        chan->flushable = pchan->flushable;
-  	} else {
-        chan->imtu = L2CAP_DEFAULT_MTU;
-        chan->omtu = 0;
-  		if (!disable_ertm && sk->sk_type == SOCK_STREAM) {
-            chan->mode = L2CAP_MODE_ERTM;
-            chan->conf_state |= L2CAP_CONF_STATE2_DEVICE;
-  		} else {
-            chan->mode = L2CAP_MODE_BASIC;
-  		}
-        chan->max_tx = L2CAP_DEFAULT_MAX_TX;
-        chan->fcs  = L2CAP_FCS_CRC16;
-        chan->tx_win = L2CAP_DEFAULT_TX_WINDOW;
-        chan->sec_level = BT_SECURITY_LOW;
-        chan->role_switch = 0;
-        chan->force_reliable = 0;
-        chan->flushable = BT_FLUSHABLE_OFF;
-  	}
-    
-  	/* Default config options */
-    chan->flush_to = L2CAP_DEFAULT_FLUSH_TO;
+	struct l2cap_chan *chan = pi->chan;
+
+	BT_DBG("sk %p", sk);
+
+	if (parent) {
+		struct l2cap_chan *pchan = l2cap_pi(parent)->chan;
+
+		sk->sk_type = parent->sk_type;
+		bt_sk(sk)->defer_setup = bt_sk(parent)->defer_setup;
+
+		chan->imtu = pchan->imtu;
+		chan->omtu = pchan->omtu;
+		chan->conf_state = pchan->conf_state;
+		chan->mode = pchan->mode;
+		chan->fcs  = pchan->fcs;
+		chan->max_tx = pchan->max_tx;
+		chan->tx_win = pchan->tx_win;
+		chan->sec_level = pchan->sec_level;
+		chan->role_switch = pchan->role_switch;
+		chan->force_reliable = pchan->force_reliable;
+		chan->flushable = pchan->flushable;
+	} else {
+		chan->imtu = L2CAP_DEFAULT_MTU;
+		chan->omtu = 0;
+		if (!disable_ertm && sk->sk_type == SOCK_STREAM) {
+			chan->mode = L2CAP_MODE_ERTM;
+			chan->conf_state |= L2CAP_CONF_STATE2_DEVICE;
+		} else {
+			chan->mode = L2CAP_MODE_BASIC;
+		}
+		chan->max_tx = L2CAP_DEFAULT_MAX_TX;
+		chan->fcs  = L2CAP_FCS_CRC16;
+		chan->tx_win = L2CAP_DEFAULT_TX_WINDOW;
+		chan->sec_level = BT_SECURITY_LOW;
+		chan->role_switch = 0;
+		chan->force_reliable = 0;
+		chan->flushable = BT_FLUSHABLE_OFF;
+	}
+
+	/* Default config options */
+	chan->flush_to = L2CAP_DEFAULT_FLUSH_TO;
 }
 
 static struct proto l2cap_proto = {
@@ -1050,7 +1016,7 @@ struct sock *l2cap_sock_alloc(struct net *net, struct socket *sock, int proto, g
 	INIT_LIST_HEAD(&bt_sk(sk)->accept_q);
 
 	sk->sk_destruct = l2cap_sock_destruct;
-	sk->sk_sndtimeo = L2CAP_CONN_TIMEOUT;
+	sk->sk_sndtimeo = msecs_to_jiffies(L2CAP_CONN_TIMEOUT);
 
 	sock_reset_flag(sk, SOCK_ZAPPED);
 
