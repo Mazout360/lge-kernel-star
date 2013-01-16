@@ -1,1 +1,0 @@
-cmd_drivers/staging/zcache/zcache.o := ../../arm-eabi-4.6/bin/arm-eabi-ld -EL    -r -o drivers/staging/zcache/zcache.o drivers/staging/zcache/tmem.o ; scripts/mod/modpost drivers/staging/zcache/zcache.o
