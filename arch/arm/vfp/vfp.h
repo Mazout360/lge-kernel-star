@@ -34,13 +34,13 @@ static inline u64 vfp_shiftright64jamming(u64 val, unsigned int shift)
 static inline u32 vfp_hi64to32jamming(u64 val)
 {
 	u32 v;
-
+    
 	asm(
-	"cmp	%Q1, #1		@ vfp_hi64to32jamming\n\t"
-	"movcc	%0, %R1\n\t"
-	"orrcs	%0, %R1, #1"
-	: "=r" (v) : "r" (val) : "cc");
-
+        "cmp	%Q1, #1		@ vfp_hi64to32jamming\n\t"
+        "movcc	%0, %R1\n\t"
+        "orrcs	%0, %R1, #1"
+        : "=r" (v) : "r" (val) : "cc");
+    
 	return v;
 }
 
@@ -74,25 +74,25 @@ static inline void mul64to128(u64 *resh, u64 *resl, u64 n, u64 m)
 {
 	u32 nh, nl, mh, ml;
 	u64 rh, rma, rmb, rl;
-
+    
 	nl = n;
 	ml = m;
 	rl = (u64)nl * ml;
-
+    
 	nh = n >> 32;
 	rma = (u64)nh * ml;
-
+    
 	mh = m >> 32;
 	rmb = (u64)nl * mh;
 	rma += rmb;
-
+    
 	rh = (u64)nh * mh;
 	rh += ((u64)(rma < rmb) << 32) + (rma >> 32);
-
+    
 	rma <<= 32;
 	rl += rma;
 	rh += (rl < rma);
-
+    
 	*resl = rl;
 	*resh = rh;
 }
@@ -113,7 +113,7 @@ static inline u64 vfp_hi64multiply64(u64 n, u64 m)
 static inline u64 vfp_estimate_div128to64(u64 nh, u64 nl, u64 m)
 {
 	u64 mh, ml, remh, reml, termh, terml, z;
-
+    
 	if (nh >= m)
 		return ~0ULL;
 	mh = m >> 32;
@@ -191,10 +191,10 @@ extern void vfp_put_float(s32 val, unsigned int reg);
 static inline void vfp_single_unpack(struct vfp_single *s, s32 val)
 {
 	u32 significand;
-
+    
 	s->sign = vfp_single_packed_sign(val) >> 16,
 	s->exponent = vfp_single_packed_exponent(val);
-
+    
 	significand = (u32) val;
 	significand = (significand << (32 - VFP_SINGLE_MANTISSA_BITS)) >> 2;
 	if (s->exponent && s->exponent != 255)
@@ -210,8 +210,8 @@ static inline s32 vfp_single_pack(struct vfp_single *s)
 {
 	u32 val;
 	val = (s->sign << 16) +
-	      (s->exponent << VFP_SINGLE_MANTISSA_BITS) +
-	      (s->significand >> VFP_SINGLE_LOW_BITS);
+    (s->exponent << VFP_SINGLE_MANTISSA_BITS) +
+    (s->significand >> VFP_SINGLE_LOW_BITS);
 	return (s32)val;
 }
 
@@ -300,10 +300,10 @@ extern void vfp_put_double(u64 val, unsigned int reg);
 static inline void vfp_double_unpack(struct vfp_double *s, s64 val)
 {
 	u64 significand;
-
+    
 	s->sign = vfp_double_packed_sign(val) >> 48;
 	s->exponent = vfp_double_packed_exponent(val);
-
+    
 	significand = (u64) val;
 	significand = (significand << (64 - VFP_DOUBLE_MANTISSA_BITS)) >> 2;
 	if (s->exponent && s->exponent != 2047)
@@ -319,8 +319,8 @@ static inline s64 vfp_double_pack(struct vfp_double *s)
 {
 	u64 val;
 	val = ((u64)s->sign << 48) +
-	      ((u64)s->exponent << VFP_DOUBLE_MANTISSA_BITS) +
-	      (s->significand >> VFP_DOUBLE_LOW_BITS);
+    ((u64)s->exponent << VFP_DOUBLE_MANTISSA_BITS) +
+    (s->significand >> VFP_DOUBLE_LOW_BITS);
 	return (s64)val;
 }
 

@@ -30,6 +30,7 @@
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/wakelock.h>
 #include <linux/spinlock.h>
 #include <linux/io.h>
 #include <linux/slab.h>
@@ -42,22 +43,27 @@ struct bcm_bt_lpm {
 	struct device *dev;
 
 	struct rfkill *rfkill;
+	struct rfkill *rfkill_btwake;
 
+	int gpio_bt_wake;
+	int gpio_host_wake;
 	int gpio_reset;
 	int reset_delay;
 	int active_low;
 
 	int irq;
 
+	int bt_wake;
+	int host_wake;
 	spinlock_t lock;
 	struct wake_lock wake_lock;
 	int (*chip_enable)(void);
 	int (*chip_disable)(void);
 
 	int blocked; /* 0: on, 1: off */
-	//                                                                   
-	struct clk *bt_32k_clk;     //                                         
-	//              
+	//LGE_CHANGE_S [munho2.lee@lge.com] 2012-02-06 for Bluetooth bring-up
+	struct clk *bt_32k_clk;     //munho2.lee@lge.com only for SU660 LGE ADD
+	//LGE_CHANGE_E		
 };
 
 #ifdef CONFIG_BRCM_HOST_WAKE
@@ -112,11 +118,11 @@ static int lbee9qmb_rfkill_set_power(void *data, bool blocked)
 	lpm->blocked = blocked;
 
 	if (blocked) {
-		//                                                                   
+		//LGE_CHANGE_S [munho2.lee@lge.com] 2012-02-06 for Bluetooth bring-up
 		if (lpm->bt_32k_clk)
 			clk_disable(lpm->bt_32k_clk);
-		//              
-		/*                                                             */
+		//LGE_CHANGE_E		
+		/* LGE_SJIT 11/18/2011 [mohamed.khadri@lge.com] BT UART Disable*/
 		if (lpm->chip_disable) {
 			if (lpm->chip_disable())
 				dev_err(lpm->dev, "%s: uart disable failed\n",
@@ -126,11 +132,11 @@ static int lbee9qmb_rfkill_set_power(void *data, bool blocked)
 		dev_dbg(lpm->dev, "%s: reset low\n", __func__);
 	}
 	else {
-		//                                                                   
+		//LGE_CHANGE_S [munho2.lee@lge.com] 2012-02-06 for Bluetooth bring-up
 		if (lpm->bt_32k_clk)
 			clk_enable(lpm->bt_32k_clk);
-		//            
-		/*                                                            */
+		//LGE_CHANGE_E
+		/* LGE_SJIT 11/18/2011 [mohamed.khadri@lge.com] BT UART Enable*/
 		if (lpm->chip_enable) {
 			if (lpm->chip_enable())
 				dev_err(lpm->dev, "%s: uart enable failed\n",
@@ -229,14 +235,14 @@ static int lbee9qmb_rfkill_probe(struct platform_device *pdev)
 		goto err_kzalloc;
 	}
 
-	//                                                                   
-	lpm->bt_32k_clk = NULL; /* clk_get(NULL, "blink");*/  //                                                                    
+	//LGE_CHANGE_S [munho2.lee@lge.com] 2012-02-06 for Bluetooth bring-up
+	lpm->bt_32k_clk = NULL; /* clk_get(NULL, "blink");*/  //LGE_CHANGE_S [munho2.lee@lge.com] 2012-03-20 Sleep clock no Control 
 	if (IS_ERR(lpm->bt_32k_clk)) {
 		pr_warn("%s: can't find lbee9qmb_32k_clk.\
 				assuming 32k clock to chip\n", __func__);
 		lpm->bt_32k_clk = NULL;
 	}
-	//            
+	//LGE_CHANGE_S
 
 	lpm->gpio_reset = pdata->gpio_reset;
 #ifdef CONFIG_BRCM_BT_WAKE
@@ -397,7 +403,7 @@ static int lbee9qmb_rfkill_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_RFKILL_PM  //                                             
+#ifdef CONFIG_RFKILL_PM  //munho2.lee@lge.com  removing suspend / resume
 static int lbee9qmb_rfkill_suspend(struct platform_device *pdev,
 		pm_message_t state)
 {
@@ -445,15 +451,15 @@ static int lbee9qmb_rfkill_resume(struct platform_device *pdev)
 #endif
 	return 0;
 }
-#endif //                  
+#endif //munho2.lee@lge.com
 
 static struct platform_driver lbee9qmb_rfkill_driver = {
 	.probe = lbee9qmb_rfkill_probe,
 	.remove = lbee9qmb_rfkill_remove,
-#ifdef CONFIG_RFKILL_PM  //                                             
+#ifdef CONFIG_RFKILL_PM  //munho2.lee@lge.com  removing suspend / resume
 	.suspend = lbee9qmb_rfkill_suspend,
 	.resume = lbee9qmb_rfkill_resume,
-#endif 	//                  
+#endif 	//munho2.lee@lge.com
 	.driver = {
 		.name = "lbee9qmb-rfkill",
 		.owner = THIS_MODULE,
