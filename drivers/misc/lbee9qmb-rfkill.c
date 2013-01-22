@@ -30,7 +30,6 @@
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
-#include <linux/wakelock.h>
 #include <linux/spinlock.h>
 #include <linux/io.h>
 #include <linux/slab.h>
@@ -43,18 +42,13 @@ struct bcm_bt_lpm {
 	struct device *dev;
 
 	struct rfkill *rfkill;
-	struct rfkill *rfkill_btwake;
 
-	int gpio_bt_wake;
-	int gpio_host_wake;
 	int gpio_reset;
 	int reset_delay;
 	int active_low;
 
 	int irq;
 
-	int bt_wake;
-	int host_wake;
 	spinlock_t lock;
 	struct wake_lock wake_lock;
 	int (*chip_enable)(void);

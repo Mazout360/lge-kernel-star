@@ -9,6 +9,8 @@
  */
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/notifier.h>
+#include <linux/cpu.h>
 #include <linux/sysdev.h>
 
 #include <asm/leds.h>
@@ -33,14 +35,14 @@ static const struct leds_evt_name evt_names[] = {
 };
 
 static ssize_t leds_store(struct sys_device *dev,
-			struct sysdev_attribute *attr,
-			const char *buf, size_t size)
+                          struct sysdev_attribute *attr,
+                          const char *buf, size_t size)
 {
 	int ret = -EINVAL, len = strcspn(buf, " ");
-
+    
 	if (len > 0 && buf[len] == '\0')
 		len--;
-
+    
 	if (strncmp(buf, "claim", len) == 0) {
 		leds_event(led_claim);
 		ret = size;
@@ -49,7 +51,7 @@ static ssize_t leds_store(struct sys_device *dev,
 		ret = size;
 	} else {
 		int i;
-
+        
 		for (i = 0; i < ARRAY_SIZE(evt_names); i++) {
 			if (strlen(evt_names[i].name) != len ||
 			    strncmp(buf, evt_names[i].name, len) != 0)
@@ -99,6 +101,25 @@ static struct sys_device leds_device = {
 	.cls		= &leds_sysclass,
 };
 
+static int leds_idle_notifier(struct notifier_block *nb, unsigned long val,
+                              void *data)
+{
+	switch (val) {
+        case IDLE_START:
+            leds_event(led_idle_start);
+            break;
+        case IDLE_END:
+            leds_event(led_idle_end);
+            break;
+	}
+    
+	return 0;
+}
+
+static struct notifier_block leds_idle_nb = {
+	.notifier_call = leds_idle_notifier,
+};
+
 static int __init leds_init(void)
 {
 	int ret;
@@ -107,6 +128,9 @@ static int __init leds_init(void)
 		ret = sysdev_register(&leds_device);
 	if (ret == 0)
 		ret = sysdev_create_file(&leds_device, &attr_event);
+	if (ret == 0)
+		idle_notifier_register(&leds_idle_nb);
+    
 	return ret;
 }
 

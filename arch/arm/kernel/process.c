@@ -205,7 +205,7 @@ void cpu_idle(void)
 	/* endless idle loop with no priority at all */
 	while (1) {
 		tick_nohz_stop_sched_tick(1);
-		leds_event(led_idle_start);
+        idle_notifier_call_chain(IDLE_START);
 		while (!need_resched()) {
 #ifdef CONFIG_HOTPLUG_CPU
 			if (cpu_is_offline(smp_processor_id()))
@@ -229,7 +229,7 @@ void cpu_idle(void)
 				local_irq_enable();
 			}
 		}
-		leds_event(led_idle_end);
+        idle_notifier_call_chain(IDLE_END);
 		tick_nohz_restart_sched_tick();
 		preempt_enable_no_resched();
 		schedule();
@@ -250,6 +250,14 @@ __setup("reboot=", reboot_setup);
 void machine_shutdown(void)
 {
 #ifdef CONFIG_SMP
+    /*
+ 	 * Disable preemption so we're guaranteed to
+ 	 * run to power off or reboot and prevent
+ 	 * the possibility of switching to another
+ 	 * thread that might wind up blocking on
+     * one of the stopped CPUs.
+ 	 */
+    preempt_disable();
 	smp_send_stop();
 #endif
 }

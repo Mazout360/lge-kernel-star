@@ -72,3 +72,5 @@ obj-$(CONFIG_TOUCHSCREEN_CLEARPAD_TM1217)	+= cptm1217/
 obj-$(CONFIG_TOUCHSCREEN_SYNAPTICS_I2C_RMI4)	+= ste_rmi4/
 obj-$(CONFIG_DRM_PSB)		+= gma500/
 obj-$(CONFIG_RAMZSWAP)		+= ramzswap/
+obj-$(CONFIG_SNAPPY_COMPRESS)  += snappy/
+obj-$(CONFIG_SNAPPY_DECOMPRESS)  += snappy/

@@ -448,6 +448,12 @@ static int vfp_pm_suspend(struct sys_device *dev, pm_message_t state)
         
 		/* disable, just in case */
 		fmxr(FPEXC, fmrx(FPEXC) & ~FPEXC_EN);
+    } else if (vfp_current_hw_state[ti->cpu]) {
+#ifndef CONFIG_SMP
+        fmxr(FPEXC, fpexc | FPEXC_EN);
+        vfp_save_state(vfp_current_hw_state[ti->cpu], fpexc);
+        fmxr(FPEXC, fpexc);
+#endif
 	}
     
 	/* clear any information we had about last context state */
