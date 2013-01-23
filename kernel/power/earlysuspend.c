@@ -106,7 +106,7 @@ static void early_suspend(struct work_struct *work)
 #if 0
 	// org sys_sync();
 	suspend_sys_sync_queue();
-#else
+//#else
     sys_sync();
 #endif
 /*                                                                                                                         */
