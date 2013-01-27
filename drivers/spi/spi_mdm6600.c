@@ -2,8 +2,8 @@
  * spi_mdm6600.c -- Serial peheripheral interface framing layer for MDM6600 modem.
  *
  * Copyright (C) 2009 Texas Instruments
- * Authors: Umesh Bysani <bysani@ti.com> and
- *      Shreekanth D.H <sdh@ti.com>
+ * Authors:	Umesh Bysani <bysani@ti.com> and
+ *		Shreekanth D.H <sdh@ti.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,9 +19,9 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/kernel.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
 #include <linux/device.h>
@@ -30,11 +30,9 @@
 #include <linux/errno.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <linux/irq.h>
 #include <mach/gpio.h>
-#include <mach/spi.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
@@ -42,1572 +40,1591 @@
 #include <linux/completion.h>
 #include <linux/spi/spi.h>
 #include <linux/workqueue.h>
-#include <linux/earlysuspend.h>
-#include <linux/suspend.h>
-#include <linux/spinlock.h>
-#include <linux/io.h>
+#include <mach/gpio-names.h>
+#include <mach/spi.h>
+#include <mach/hardware.h>
+#include <linux/hrtimer.h>
 #include <linux/delay.h>
-#include <linux/proc_fs.h>
-#include <linux/uaccess.h>  // copy_from/to_user()
-#include <linux/version.h>
-#include <linux/io.h>
-#include "spi_mdm6600.h"
-#ifdef WAKE_LOCK_RESUME
+#include <linux/err.h>
+#include <linux/gpio.h>
+
+#ifdef CONFIG_HAS_WAKELOCK
 #include <linux/wakelock.h>
+
+#define SPI_WAKELOCK_TIMEOUT 3
 #endif
 
-/*------------------------------------------------------------------*/
-/* Configuration                                                    */
-/*------------------------------------------------------------------*/
+#define TX_BUFFER_QUEUE
+#define MDM6600_SPI_HEADER
+#define SPI_STATISTICS_CHECK //create dummy traffic using a polling method with a timer setting of 10 sec to release the AP from an AT command pending state
 
-#define MSPI_DRIVER_NAME                            "mdm6600"
-#define MSPI_DRIVER_VERSION                         "23-mar-12"
+#ifndef MDM6600_SPI_HEADER
+#include <linux/spi/ifx_n721_spi.h>
+#else
+#define IFX_SPI_FRAME_SIZE  (2048 * 2)
+#define IFX_SPI_HEADER_SIZE 8
+#define IFX_SPI_MAX_BUF_SIZE (IFX_SPI_FRAME_SIZE - IFX_SPI_HEADER_SIZE)
+#define IFX_SPI_DEFAULT_BUF_SIZE (IFX_SPI_FRAME_SIZE - IFX_SPI_HEADER_SIZE)
+#define IFX_SPI_MAJOR                   153     /* assigned */
+#define IFX_N_SPI_MINORS                4       /* ... up to 256 */
+#endif
 
-#define MSPI_DRV_DEBUG_LEVEL                        10
-#define MSPI_EXTENDED_DEBUG_OUTPUT_FORMAT
+/* define for spi1, spi2 port gpio information */
+static int SPI1_SRDY;
+static int SPI1_MRDY;
+static int SPI2_SRDY;
+static int SPI2_MRDY;
 
-#define MSPI_MAX_RX_FRAME_BUFS                      10
-#define MSPI_DATA_TABLE_SIZE                        1
-#define MSPI_DEFAULT_TABLE_ENTRY                    0
+#define GPIO_CP_STATE         TEGRA_GPIO_PO6    // GPIO_RESERVED_1
+#define GPIO_IFX_RESET_1V8_N  TEGRA_GPIO_PV0
+#define GPIO_IFX_PWRON_1V8    TEGRA_GPIO_PV1
 
-#define MSPI_WAKE_LOCK_TIMEOUT                      msecs_to_jiffies(600)
+//#define TTYSPI_DEBUG
+#ifdef TTYSPI_DEBUG
+#define TTYSPI_DEBUG_PRINT(format, args ...) printk(KERN_INFO format, ## args)
+#else
+#define TTYSPI_DEBUG_PRINT(format, args ...)
+#endif
 
-/*------------------------------------------------------------------*/
-/* END Configuration                                                */
-/*------------------------------------------------------------------*/
+/* ######################################################################## */
 
-/*------------------------------------------------------------------*/
-/* Driver Name and Version                                          */
-/*------------------------------------------------------------------*/
-
-static const char mspi_drv_driver_name[]            = MSPI_DRIVER_NAME;
-static const char mspi_drv_driver_version[]         = MSPI_DRIVER_VERSION;
-
-/*------------------------------------------------------------------*/
-/* END Driver Name and Version                                      */
-/*------------------------------------------------------------------*/
-
-/* Global variable used to trigger system shutdown is started */
-static int ifx_shutdown                             = 0;
-static bool mspi_issuspend                          = false;
-static bool mspi_irq_pending                        = false;
-
-
-/* ################################################################################################################ */
+struct spi_device *global_spi;        //for time out callback function
 
 /* Structure used to store private data */
-struct ifx_spi_data 
-{
-    dev_t                       devt;
-    struct spi_device           *spi;
-    struct tty_struct           *ifx_tty;
-
-/* users shows how much spi devices was opened from user space. In current implementation it should be not greater then 1*/
-    unsigned int                 users;
-    struct work_struct           ifx_work;
-    struct workqueue_struct     *ifx_wq;
-
-    unsigned int                 ifx_receiver_buf_size;
-    unsigned int                 ifx_receiver_more_data;
-    unsigned char               *ifx_tx_buffer;
-    unsigned char               *ifx_rx_buffer;
-#ifdef WAKE_LOCK_RESUME
-    struct wake_lock             wake_lock;
+struct mdm_spi_data {
+	dev_t				devt;
+	spinlock_t			spi_lock;
+	struct spi_device *		spi;
+	struct list_head		device_entry;
+	struct completion		mdm_read_write_completion;
+	struct tty_struct *		mdm_tty;
+	unsigned int			index;
+    
+#ifdef TX_BUFFER_QUEUE
+	bool				is_waiting;
 #endif
-    unsigned                     mrdy_gpio;
-    unsigned                     srdy_gpio;
-    struct work_struct           ifx_free_irq_work;
-    struct notifier_block        pm_notifier;
+    
+	/* buffer is NULL unless this device driver is open (users > 0) */
+	struct mutex			buf_lock;
+	unsigned			users;
+	unsigned int			throttle;
+	struct work_struct		mdm_work;
+	struct workqueue_struct *	mdm_wq;
+    
+	/* For dual spi */
+	/* Tx/Rx Buffer */
+	unsigned char *			mdm_tx_buffer;
+	unsigned char *			mdm_rx_buffer;
+	unsigned int			mdm_master_initiated_transfer;
+    
+	/* Buffer management */
+	unsigned int			mdm_sender_buf_size;
+	unsigned int			mdm_receiver_buf_size;
+	unsigned int			mdm_current_frame_size;
+	unsigned int			mdm_valid_frame_size;
+	unsigned int			mdm_ret_count;
+	unsigned int			mdm_spi_count;
+	const unsigned char *		mdm_spi_buf;
+    
+	struct hrtimer			timer; /* for timeout callback function */
+    
+#ifdef CONFIG_HAS_WAKELOCK
+	struct wake_lock		spi_wakelock;
+#endif
+    
+	int				is_suspended;
+    
+	atomic_t			is_syncing;
 };
 
-/*spi_data_table is consist of 1 spi_data for each mcspi port */
-struct ifx_spi_data           *spi_data_table[MSPI_DATA_TABLE_SIZE];
-struct tty_driver             *ifx_spi_tty_driver;
-
-
-/*------------------------------------------------------------------*/
-/* Debug                                                            */
-/*------------------------------------------------------------------*/
-#ifdef MSPI_DRV_DEBUG_LEVEL
-static unsigned int debug_level                     = 0;
-#endif
-#ifdef MSPI_EXTENDED_DEBUG_OUTPUT_FORMAT
-#define MSPI_DEBUG_OUTPUT_FORMAT                    MSPI_DRIVER_NAME "(" MSPI_DRIVER_VERSION ")"
+union mdm_spi_frame_header {
+	struct {
+		unsigned int	curr_data_size : 12;
+		unsigned int	more : 1;
+		unsigned int	res1 : 1;
+		unsigned int	res2 : 2;
+		unsigned int	next_data_size : 12;
+		unsigned int	ri : 1;
+		unsigned int	dcd : 1;
+		unsigned int	cts_rts : 1;
+		unsigned int	dsr_dtr : 1;
+	} mdm_spi_header;
+#ifdef MDM6600_SPI_HEADER
+	unsigned char	framesbytes[4];
+	unsigned int	framecount;
 #else
-#define MSPI_DEBUG_OUTPUT_FORMAT                    MSPI_DRIVER_NAME
+	unsigned char	framesbytes[IFX_SPI_HEADER_SIZE];
 #endif
-#define MSPI_ERR(msg,args...)                       {printk(KERN_ERR MSPI_DEBUG_OUTPUT_FORMAT ":%s: " msg "\n",__func__, ## args);}
-#ifdef MSPI_DRV_DEBUG_LEVEL
-#define MSPI_ISDBG(level)                           (((level) <= MSPI_DRV_DEBUG_LEVEL) && ((level) <= debug_level))
-#define MSPI_DBG(level,msg,args...)                 { if (MSPI_ISDBG(level)) {printk(KERN_INFO MSPI_DEBUG_OUTPUT_FORMAT ": " msg "\n", ## args);}; }
-// Unconditional
-#define UNMSPI_DBG(msg,args...)                     { {printk(KERN_INFO MSPI_DEBUG_OUTPUT_FORMAT ": " msg "\n", ## args);}; }
-#define MSPI_DRV_DEBUG_FS_LEVEL
-#else
-#define MSPI_ISDBG(level)                           0
-#define MSPI_DBG(level,msg,args...)
-#endif
-
-static volatile unsigned int mspi_frame_tx_count    = 0;
-/*------------------------------------------------------------------*/
-/* END Debug                                                        */
-/*------------------------------------------------------------------*/
-
-
-/*------------------------------------------------------------------*/
-/* TX: send from AP to CP                                           */
-/*------------------------------------------------------------------*/
-#ifdef MSPI_EXTENDED_HEADER
-#define MSPI_MAX_TX_FRAME_BUFS                      6
-#else
-#define MSPI_MAX_TX_FRAME_BUFS                      8
-#endif
-
-static u8 *mspi_tx_buffer_start                     = NULL;
-static u8 *mspi_tx_buffer_end                       = NULL;
-static u8 *mspi_tx_buffer_pos                       = NULL;
-static u8 *mux_tx_buffer_pos                        = NULL;
-static u8 *mspi_tx_buffer_backup                    = NULL;
-
-
-/* shows how much data present in the tx buffer */
-static unsigned int mspi_tx_buffer_data_count       = 0;
-
-/* watermarks used for upper TTY client throttling */
-#define MSPI_TX_BUFFER_WTRMK_HIGH                   (((MSPI_MAX_TX_FRAME_BUFS - 1) * MSPI_MAX_BUFF_SIZE) - MSPI_HEADER_SIZE)
-#define MSPI_TX_BUFFER_WTRMK_LOW                    (MSPI_MAX_BUFF_SIZE * 2)
-
-static spinlock_t spi_nodes_lock                    = SPIN_LOCK_UNLOCKED;
-
-/* This falg is used to trigger the necessity to wakeup tty client. It becomes 1 after TX High watermark is reached
-   Later, when the buffer is processed and reaches Low watermark point, the flag clears to 0, and tty client wakes up */
-static u8 mspi_tty_client_wakeup                    = 0;
-/*------------------------------------------------------------------*/
-/* END TX: send from AP to CP                                       */
-/*------------------------------------------------------------------*/
-
-
-/*------------------------------------------------------------------*/
-/* RX: recv from CP to AP                                           */
-/*------------------------------------------------------------------*/
-// MSPI_MAX_RX_FRAME_BUFS > 5
-
-static unsigned char *mspi_rx_buffer_start          = NULL;
-static unsigned char *mspi_rx_buffer_end            = NULL;
-static unsigned int mux_rx_buffer_curr_size         = 0;
-#define MSPI_RX_BUFFER_SIZE                         (MSPI_MAX_RX_FRAME_BUFS * MSPI_MAX_BUFF_SIZE)
-#define MSPI_RX_BUFFER_WTRMK_HIGH                   ((MSPI_MAX_RX_FRAME_BUFS - 1) * MSPI_MAX_BUFF_SIZE)
-#define MSPI_RX_BUFFER_WTRMK_LOW                    (MSPI_MAX_BUFF_SIZE)
-static spinlock_t mux_rx_buff_lock                  = SPIN_LOCK_UNLOCKED;
-
-static struct semaphore mspi_rx_completion          = __SEMAPHORE_INITIALIZER(mspi_rx_completion, 0);
-
-#define MSPI_CAN_RECEIVE                            ( (rts_mspi_data_flag >= 1) && \
-                                                      (mux_rx_buffer_curr_size < MSPI_RX_BUFFER_WTRMK_LOW) )
-
-#define MSPI_CANNOT_RECEIVE                         ( (rts_mspi_data_flag == 0) && \
-                                                      (mux_rx_buffer_curr_size >= MSPI_RX_BUFFER_WTRMK_HIGH) )
-
-static struct workqueue_struct *mspi_rx_wq          = NULL;
-struct mspi_rx_work
-{
-    struct work_struct      work;
-    unsigned char          *mspi_rx_buffer;
-    struct ifx_spi_data    *spi_data;
-    struct tty_struct      *ifx_tty;
-    int                     len;
 };
 
+struct mdm_spi_data *gspi_data[2];
+struct tty_driver *mdm_spi_tty_driver;
+unsigned int assign_num = 0;
 
-/*------------------------------------------------------------------*/
-/* END RX: recv from CP to AP                                       */
-/*------------------------------------------------------------------*/
-
-/*------------------------------------------------------------------*/
-/* SPI SYNC & COUNT                                                 */
-/*------------------------------------------------------------------*/
-#define MSPI_DMA_ALIGN                              16
-
-static int mspi_data_tx_next_len                    = 0;
-static int mspi_data_rx_next_len                    = 0;
-
-/* this variable is used to hold the DMA buffer size that will be used in next transfer
-   Typically it is MAX of the TX and RX buffers that are planned for the next transfer
-   However in case if both TX and RX are going to be 0 we sometimes */
-static int mspi_curr_dma_data_len                   = MSPI_DEF_BUFF_SIZE;
-static u8 cts_mspi_data_flag                        = 0;
-static volatile u8 rts_mspi_data_flag               = 0;
-
-static int is_tx_rx_required                        = 0;
-/*------------------------------------------------------------------*/
-/* END SPI SYNC & COUNT                                             */
-/*------------------------------------------------------------------*/
-
-/*------------------------------------------------------------------*/
-/* SPI2SPI TEST MODE                                                */
-/*------------------------------------------------------------------*/
-#ifdef SPI2SPI_TEST
-#define TIOCSPI2SPISTART                            0x5501
-#define TIOCSPI2SPISTOP                             0x5502
-#define TIOCGSTAT                                   0x5503
-
-static uint64_t spi2spi_counter;
-static spinlock_t spi2spi_lock                      = SPIN_LOCK_UNLOCKED;
-
-static u8 spi2spi_test_is_running                   = 0;
-
-static u8 *spi2spi_tx_buff                          = NULL;
-static u8 *spi2spi_rx_buff                          = NULL;
-static u16 spi2spi_buff_size                        = MSPI_MAX_BUFF_SIZE;
-
-struct spi2spi_args {
-    int         testcase;
-    int         xfer_size;
-    int         pattern;
+struct allocation_table {
+	unsigned short	allocated;
+	atomic_t	in_use;
 };
 
-struct spi2spi_stat {
-    uint64_t         counter;
-    uint64_t         timestamp;
-};
-
-struct spi2spi_args s2s_test;
-
-static int spi2spi_start_test(struct ifx_spi_data *spi_data);
-static void ifx_spi2spi_handle_work(struct work_struct *work);
-#endif //SPI2SPI_TEST
-
-/*------------------------------------------------------------------*/
-/* END SPI2SPI TEST MODE                                                                              */
-/*------------------------------------------------------------------*/
+struct allocation_table spi_table[4];
 
 
-/*------------------------------------------------------------------*/
-/* IOCTL                                                                                                    */
-/*------------------------------------------------------------------*/
-
-static DEFINE_MUTEX(mspi_transfer_lock);
-static DEFINE_MUTEX(mspi_rx_flush_lock);
-
-/*------------------------------------------------------------------*/
-/* END IOCTL                                                                                                */
-/*------------------------------------------------------------------*/
-
-/* ################################################################################################################ */
+/* ######################################################################## */
 /* Global Declarations */
+
 /* Function Declarations */
-// MSPI Header functions
-static void ifx_spi_header_set_info(unsigned char *header_buffer, unsigned int curr_buf_size, unsigned int next_buf_size);
-static void ifx_spi_header_get_info(unsigned char *header_buffer, unsigned int *curr_buf_size, unsigned int *next_buf_size);
-static void ifx_spi_header_update_curr_size(unsigned char *header_buffer, unsigned int curr_buf_size);
-static void ifx_spi_header_update_next_size(unsigned char *header_buffer, unsigned int next_buf_size);
-static inline int ifx_spi_header_get_more_flag(unsigned char *rx_buffer);
-static inline int ifx_spi_header_get_cts_flag(unsigned char *rx_buffer);
+static void mdm_spi_set_header_info(unsigned char *header_buffer, unsigned int curr_buf_size,
+                                    unsigned int next_buf_size);
+static int mdm_spi_get_header_info(struct mdm_spi_data *spi_data, unsigned int *valid_buf_size);
+static void mdm_spi_set_srdy_signal(s16 bus_num, int value);
+static irqreturn_t mdm_spi_handle_mrdy_irq(int irq, void *handle);
+#ifndef TX_BUFFER_QUEUE
+static void mdm_spi_setup_transmission(struct mdm_spi_data *spi_data);
+#endif
+static void mdm_spi_send_and_receive_data(struct mdm_spi_data *spi_data, int tx_pending);
+#ifndef TX_BUFFER_QUEUE
+static int mdm_spi_get_next_frame_size(int count);
+#endif
+static int mdm_spi_allocate_frame_memory(struct mdm_spi_data *	spi_data,
+                                         unsigned int		memory_size);
+static void mdm_spi_buffer_initialization(struct mdm_spi_data *spi_data);
+static unsigned int mdm_spi_sync_read_write(struct mdm_spi_data *spi_data, unsigned int len);
+static void mdm_spi_handle_work(struct work_struct *work);
+static int mdm_spi_callback(void *client_data);
+#ifdef TX_BUFFER_QUEUE
+int get_tx_pending_data(struct mdm_spi_data *spi_data, int *anymore);
+#endif
 
-static void ifx_spi_ap_ready(struct spi_device *spi);
-static irqreturn_t ifx_spi_handle_mrdy_irq(int irq, void *handle);
-static void ifx_spi_sync_data(struct ifx_spi_data *spi_data);
-static int ifx_spi_allocate_frame_memory(struct ifx_spi_data *spi_data, unsigned int memory_size);
-static void ifx_spi_free_frame_memory(struct ifx_spi_data *spi_data);
-static void ifx_spi_buffer_initialization(struct ifx_spi_data *spi_data);
-static void ifx_spi_handle_work(struct work_struct *work);
-static void ifx_spi_handle_free_irq_work(struct work_struct *work);
+int is_modem_communicating(void);
 
-static int ifx_pm_notifier_event(struct notifier_block *this, unsigned long event, void *ptr);
-static int ifx_spi_resume(struct spi_device *spi);
-static int ifx_spi_suspend(struct spi_device *spi, pm_message_t mesg);
+#ifdef MDM6600_SPI_HEADER
+static unsigned int tx_count[2] = { 0, 0 };
+static unsigned int rx_count[2] = { 0, 0 };
+#endif
 
-// QUEUE
-static int mspi_queue_data_insert_item(const unsigned char *buf, int count);
-static void mspi_queue_data_setup_spi_tx_buf(struct ifx_spi_data *spi_data);
-static int mspi_queue_empty(void);
+unsigned char rx_dummy[] = { 0xff, 0xff, 0xff, 0xff };
 
-static void mspi_dump_compilation_info(void);
+#define USE_SRDY
+#ifndef USE_SRDY
+#define ENABLE_SRDY_IRQ(irq)    enable_irq(irq);
+#define DISABLE_SRDY_IRQ(irq)   disable_irq(irq);
+#else
+#define ENABLE_SRDY_IRQ(irq)
+#define DISABLE_SRDY_IRQ(irq)
+#endif
 
-static void mspi_tx_buffer_flush(struct ifx_spi_data *spi_data);
-static void mspi_rx_buffer_flush(struct ifx_spi_data *spi_data);
+/* ######################################################################## */
 
+static LIST_HEAD(device_list);
+static DEFINE_MUTEX(device_list_lock);
 
-/* ################################################################################################################ */
+#ifdef TX_BUFFER_QUEUE
+#define MAX_SPI_DATA_QUEUE 200
 
-static void inline dump_spi_simple(u8 *data)
+struct spi_data_send_struct;
+struct spi_data_send_struct {
+	struct spi_data_send_struct *	curr;
+	struct spi_data_send_struct *	next;
+	struct spi_data_send_struct *	prev;
+	u8				count;
+	u8 *				data;
+	int				size;
+	u8 *				bkp_data;
+	int				bkp_size;
+};
+static struct spi_data_send_struct *spi_data_send_pending = NULL;
+static int queue_first_time = 1;
+
+DEFINE_SPINLOCK(spi_nodes_lock);
+static unsigned long spi_lock_flag;
+static atomic_t next_transfer_flag = ATOMIC_INIT(0);
+//static int timeout_count = 0;
+#endif
+
+extern void disable_mdm_irq(void);
+
+/* ######################################################################## */
+
+/* MDM SPI Operations */
+
+static enum hrtimer_restart spi_timeout_cb_func(struct hrtimer *timer)
 {
-    UNMSPI_DBG("TS spi dump %x %x %x %x %x %x %x %x \n", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+	struct spi_device *temp_spi = (struct spi_device *)global_spi;
+    
+	TTYSPI_DEBUG_PRINT(
+                       "%s called ...........................................................\n",
+                       __func__);
+	//spi_tegra_abort_transfer(temp_spi);
+	return HRTIMER_NORESTART;
 }
 
-static void
-mspi_dump_spi_header_info(unsigned char *buffer, int is_rx)
+#ifdef SPI_STATISTICS_CHECK
+#define SPI_STAT_POLL_PERIOD (10)    // sec
+static struct  timer_list spi_statistics_timer;
+static int statistics_count = 0;
+static int dummy_data_flag = 0;
+
+typedef enum {
+	SPI_STAT_STATE_MIN = 0,
+	SPI_STAT_STATE_TXRX_NOT_CHG,
+	SPI_STAT_STATE_RX_ONLY_NOT_CHG,
+	SPI_STAT_STATE_STILL_NOT_CHG = SPI_STAT_STATE_RX_ONLY_NOT_CHG,
+	SPI_STAT_STATE_DUMMY_TRANSACTION,
+	SPI_STAT_STATE_DUMMY_TRANSACTION2,
+	SPI_STAT_STATE_NO_TRANSACTION,
+	SPI_STAT_STATE_MAX,
+}spi_statistics_state_type;
+
+static spi_statistics_state_type spi_s_state = SPI_STAT_STATE_MIN;
+
+
+static void spi_statistic_cb_func(unsigned long unused)
 {
-    struct ifx_spi_frame_header *header = (struct ifx_spi_frame_header *)buffer;
-
-    if(is_rx == 0)
-    {
-        UNMSPI_DBG("TX c%d m%d n%d cts%d\n",
-            header->curr_data_size,
-            header->more,
-            header->next_data_size,
-            header->cts_rts);
-    }
-    else
-    {
-        UNMSPI_DBG("RX c%d m%d n%d cts%d\n",
-            header->curr_data_size,
-            header->more,
-            header->next_data_size,
-            header->cts_rts);
-    }
+	static unsigned int spi_tx_count = -1;
+	static unsigned int spi_rx_count = -1;
+	struct mdm_spi_data *spi_data = (struct mdm_spi_data *)gspi_data[0];
+	int ret;
+	int tx_chg_flg = (spi_tx_count == tx_count[0]) ? 0 : 1;
+	int rx_chg_flg = (spi_rx_count == rx_count[0]) ? 0 : 1;
+    
+	statistics_count++;
+    
+	TTYSPI_DEBUG_PRINT("%s: statistics_count=%d, spi_h_state=%d\n", __func__,
+                       statistics_count,
+                       spi_s_state);
+    
+	if (tx_chg_flg || rx_chg_flg) {
+		spi_s_state = SPI_STAT_STATE_MIN;
+	} else {
+		if ((tx_chg_flg == 1) && (rx_chg_flg == 0))
+			spi_s_state = SPI_STAT_STATE_RX_ONLY_NOT_CHG;
+		switch (spi_s_state) {
+            case SPI_STAT_STATE_MIN:
+                spi_s_state = SPI_STAT_STATE_TXRX_NOT_CHG;
+                break;
+            case SPI_STAT_STATE_TXRX_NOT_CHG:
+                spi_s_state = SPI_STAT_STATE_STILL_NOT_CHG;
+                break;
+            case SPI_STAT_STATE_STILL_NOT_CHG:
+                spi_s_state = SPI_STAT_STATE_DUMMY_TRANSACTION;
+                break;
+            case SPI_STAT_STATE_DUMMY_TRANSACTION:
+                spi_s_state = SPI_STAT_STATE_DUMMY_TRANSACTION2;
+                break;
+            case SPI_STAT_STATE_DUMMY_TRANSACTION2:
+            case SPI_STAT_STATE_NO_TRANSACTION:
+                spi_s_state = SPI_STAT_STATE_NO_TRANSACTION;
+                break;
+            case SPI_STAT_STATE_MAX:
+            default:
+                printk(KERN_ERR "%s Unknown SPI statistics State %d \n", __func__,
+                       spi_s_state);
+                spi_s_state = SPI_STAT_STATE_NO_TRANSACTION;
+                break;
+		}
+	}
+    
+	if (spi_data->is_suspended)
+		if (spi_s_state != SPI_STAT_STATE_NO_TRANSACTION)
+			spi_s_state = SPI_STAT_STATE_MIN;
+    
+	TTYSPI_DEBUG_PRINT("spi Tx : prev %d curr %d flg=%d\n", spi_tx_count, tx_count[0],
+                       tx_chg_flg);
+	TTYSPI_DEBUG_PRINT("spi Rx : prev %d curr %d flg=%d spi_h_state=%d\n", spi_rx_count,
+                       rx_count[0], rx_chg_flg,
+                       spi_s_state);
+    
+	if ((spi_s_state == SPI_STAT_STATE_DUMMY_TRANSACTION)
+	    || (spi_s_state == SPI_STAT_STATE_DUMMY_TRANSACTION2)) {
+		dummy_data_flag++;
+		printk(KERN_INFO "spi dummy transaction dummy_data_flag=%d, spi_s_state=%d \n",
+		       dummy_data_flag,
+		       spi_s_state);
+        
+		//prevent spi transmission being registered as workqueue event
+		if (atomic_read(&spi_table[spi_data->index].in_use) == 1)
+			queue_work(spi_data->mdm_wq, &spi_data->mdm_work);
+	}
+    
+	spi_tx_count = tx_count[0];
+	spi_rx_count = rx_count[0];
+    
+	ret =
+    mod_timer(&(spi_statistics_timer),
+			  round_jiffies(jiffies + (SPI_STAT_POLL_PERIOD * HZ)));
+	if (ret) printk(KERN_ERR "%s:: Error in mod_timer\n", __func__);
+    
+	TTYSPI_DEBUG_PRINT("%s ended ...(%d, %d)\n", __func__, statistics_count, spi_s_state);
 }
-
-#ifdef MSPI_DRV_DEBUG_FS_LEVEL
-/*--------------------------------------------------------------------
- * BEGINS: Proc file system related DBG functionality for SPI.
- *--------------------------------------------------------------------
- */
-#define MSPI_PROC_DBG_FILE                          "driver/mspi_dbg_level"
-#define MSPI_DBG_PROC_BUF_MAX_LEN                   3UL
-
-static struct proc_dir_entry *mspi_proc_dbg_file;
-
-static int mspi_proc_dbg_read(char *page, char **start, off_t off, int count, int *eof, void *data)
-{
-    int len;
-
-    MSPI_DBG(8, "%s called, curr debug_level = %d\n", __FUNCTION__, debug_level);
-    len = sprintf(page, "%d\n", debug_level);
-
-    return len;
-
-}
-
-static int mspi_proc_dbg_write(struct file *file, const char __user *buffer, unsigned long count, void *data)
-{
-    char buff[MSPI_DBG_PROC_BUF_MAX_LEN];
-    int val;
-    unsigned long len = min(MSPI_DBG_PROC_BUF_MAX_LEN, count);
-    MSPI_DBG(8, "%s called, curr debug_level = %u, passed count %lu\n", __FUNCTION__, debug_level, count);
-
-    if(copy_from_user(buff, buffer, len))
-        return -EFAULT;
-
-    buff[len-1] = '\0';
-    val = simple_strtoul(buff, NULL, 10);
-
-    if(val >= 0 && val <= MSPI_DRV_DEBUG_LEVEL)
-    {
-        debug_level = (unsigned int)val;
-        MSPI_DBG(8, "%s: updated debug_level = %u\n", __FUNCTION__, debug_level);
-    }
-
-    return len;
-}
-
-static void create_mspi_proc_dbg_file(void)
-{
-    mspi_proc_dbg_file = create_proc_entry(MSPI_PROC_DBG_FILE, 0664, NULL);
-
-    if(mspi_proc_dbg_file != NULL)
-    {
-        mspi_proc_dbg_file->read_proc = mspi_proc_dbg_read;
-        mspi_proc_dbg_file->write_proc = mspi_proc_dbg_write;
-    }
-    else
-        MSPI_ERR(" MSPI DBG proc file create failed!\n");
-}
-
-static void remove_mspi_proc_dbg_file(void)
-{
-    remove_proc_entry(MSPI_PROC_DBG_FILE, NULL);
-}
-
-#endif //MSPI_DRV_DEBUG_LEVEL
-
-static inline void mspi_dump_compilation_info(void)
-{
-    MSPI_DBG(0," compilled with \n\t def_pkt_size=%d \n\t max_pkt_size=%d\n\t TX_buf_size=%d\n\t RX_buf_size=%d\n",
-        MSPI_DEF_BUFF_SIZE, MSPI_MAX_BUFF_SIZE,
-        MSPI_MAX_BUFF_SIZE * (MSPI_MAX_TX_FRAME_BUFS + 2), MSPI_RX_BUFFER_SIZE);
-}
-/* IFX SPI Operations */
+#endif
 
 /*
  * Function opens a tty device when called from user space
  */
-static int
-ifx_spi_open(struct tty_struct *tty, struct file *filp)
+static int mdm_spi_open(struct tty_struct *tty, struct file *filp)
 {
-    struct ifx_spi_data *spi_data;
-
-    MSPI_DBG(0," ifx_spi_open called");
-    ifx_shutdown = 0;
-    mspi_tty_client_wakeup = 0;
-
-    switch (tty->index)
-    {
-        case 3: /* ttyspi3 for CP */
-        case 2: /* ttyspi2 for CP */
-        case 1: /* ttyspi1 for CP */
-        case 0: /* ttyspi0 for CP */
-            MSPI_DBG(5," try to open SPI tty->index : %d \n", tty->index );
-            spi_data = spi_data_table[MSPI_DEFAULT_TABLE_ENTRY];
-            break;
-        default: /* Never reach here */
-            MSPI_ERR(" ifx_spi_open tty->index : %d not support\n", tty->index );
-            return -ENODEV;
-    }
-
-    if(spi_data == NULL)
-    {
-        MSPI_ERR(" ifx_spi_open spi_data NULL - tty->index: %d \n", tty->index );
-        return -ENODEV;
-    }
-
-    ifx_spi_buffer_initialization(spi_data);
-    if (spi_data->users++ == 0)
-    {
-        tty->driver_data = (void *)spi_data;
-        spi_data->ifx_tty = tty;
-    }
-
-    tty->low_latency = 1;
-
-    return 0;
-}
-
-/*
- * Function closes a opened a tty device when called from user space
- */
-static void
-ifx_spi_close(struct tty_struct *tty, struct file *filp)
-{
-    struct ifx_spi_data *spi_data = (struct ifx_spi_data *)tty->driver_data;
-
-    MSPI_DBG(7, "%s called mdm\n", __FUNCTION__);
-
-    // Prohibit the writes while mSPI is shutting down
-    ifx_shutdown = 1;
-
-    if((spi_data != NULL) && (spi_data->users != 0))
-    {
-        if(--spi_data->users == 0)
-        {
-            tty_driver_flush_buffer(tty);
-            spi_data->ifx_tty = NULL;
-            tty->driver_data = NULL;
-        }
-    }
-}
-
-static int
-ifx_spi_write(struct tty_struct *tty, const unsigned char *buf, int count)
-{
-    int ret;
-    struct ifx_spi_data *spi_data = (struct ifx_spi_data *)tty->driver_data;
-
-    if (ifx_shutdown) return -ENODEV;
-
-    if(spi_data == NULL || buf == NULL || count <= 0) return 0;
-
-#ifdef SPI2SPI_TEST
-    spin_lock_bh(&spi2spi_lock);
-    if (spi2spi_test_is_running == 1)
-    {
-        MSPI_ERR("ifx_spi_write: Device is unavailable during spi to spi test");
-        spin_unlock_bh(&spi2spi_lock);
-        return -EBUSY;
-    }
-    spin_unlock_bh(&spi2spi_lock);
-#endif
-
-    ret = mspi_queue_data_insert_item(buf, count);
-#ifdef WAKE_LOCK_RESUME
-    wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
-#endif
-    queue_work(spi_data->ifx_wq, &spi_data->ifx_work);
-    MSPI_DBG(9, "ifx_spi_write: ret = %d", ret);
-    return ret;
-}
-
-/* This function should return number of free bytes left in the write buffer in this case always return 2048 */
-
-static int
-ifx_spi_write_room(struct tty_struct *tty)
-{
-    if(mspi_tty_client_wakeup == 1)
-    {
-        return 0;
-    }
-
-    return (MSPI_TX_BUFFER_WTRMK_HIGH - mspi_tx_buffer_data_count);
-}
-
-static int
-ifx_spi_chars_in_buffer(struct tty_struct *tty)
-{
-    return mspi_tx_buffer_data_count;
-}
-
-static void
-ifx_spi_throttle(struct tty_struct *tty)
-{
-    MSPI_DBG(3, "throttle");
-}
-
-static void
-ifx_spi_unthrottle(struct tty_struct *tty)
-{
-    MSPI_DBG(3, "unthrottle");
-
-    up(&mspi_rx_completion);
-    down_trylock(&mspi_rx_completion);
-}
-
-
-static void
-ifx_spi_flush_buffer(struct tty_struct *tty)
-{
-  struct ifx_spi_data *spi_data = (struct ifx_spi_data *)tty->driver_data;
-
-  if (spi_data != NULL)
-  {
-    MSPI_DBG(5, "flush buffer on mSPI");
-
-    mspi_rx_buffer_flush(spi_data);
-    mspi_tx_buffer_flush(spi_data);
-  }
-}
-
-static void
-ifx_spi_hangup(struct tty_struct *tty)
-{
-    MSPI_DBG(5, "hangup on mSPI");
-
-    tty_wakeup(tty);
-    tty_ldisc_flush(tty);
-    //TODO close
-}
-
-static void
-ifx_spi_set_ldisc(struct tty_struct *tty)
-{
-    MSPI_DBG(5, "ldisc changed on mSPI");
-}
-
-
-static int
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39))
-ifx_spi_tiocmget(struct tty_struct *tty, struct file *file)
-#else
-ifx_spi_tiocmget(struct tty_struct *tty)
-#endif
-{
-    int status = 0;
-
-    if(cts_mspi_data_flag != 0)
-        status |= TIOCM_CTS;
-
-    if(rts_mspi_data_flag != 0)
-        status |= TIOCM_RTS;
-
-    return status;
-}
-
-/*
-This function copies external data from buf to internal tx buffer.
-It tackes care of tx cycle filling in case if end of the buffer is reached.
-As well as intrenal position variables calculating.
-*/
-static int mspi_queue_data_insert_item(const unsigned char *buf, int count)
-{
-    int len = 0;
-    int remain_len = 0;
-
-    spin_lock_bh(&spi_nodes_lock);
-
-    if((mspi_tty_client_wakeup == 1) || ((mspi_tx_buffer_data_count + count) > MSPI_TX_BUFFER_WTRMK_HIGH))
-    {
-            mspi_tty_client_wakeup = 1;
-            MSPI_DBG(6,"TS qdi failed \n");
-            spin_unlock_bh(&spi_nodes_lock);
-            return 0;
-    }
-
-    if((remain_len = (mux_tx_buffer_pos + count) - mspi_tx_buffer_end) < 0)
-    {
-        len = count;
-        remain_len = 0;
-    }
-    else
-    {
-        len = count - remain_len;
-    }
-
-    memcpy(mux_tx_buffer_pos, buf , len);
-    if(remain_len == 0)
-    {
-        mux_tx_buffer_pos += len;
-    }
-    else
-    {
-        mux_tx_buffer_pos = mspi_tx_buffer_start + MSPI_HEADER_SIZE;
-        memcpy(mux_tx_buffer_pos, buf+len , remain_len);
-        mux_tx_buffer_pos += remain_len;
-    }
-    mspi_tx_buffer_data_count += count;
-    MSPI_DBG(7,"TS qdi: len=%d , remain_len=%d , count=%d , buff_used_size=%d\n", len, remain_len, count,mspi_tx_buffer_data_count);
-
-    spin_unlock_bh(&spi_nodes_lock);
-
-    return count;
-}
-
-
-static void mspi_queue_data_setup_spi_tx_buf(struct ifx_spi_data *spi_data)
-{
-    int n_data_to_tx_len = 0;
-    int n_remaining_tx_buffer_len = 0;
-    u8 *temp_p = NULL;
-    spin_lock_bh(&spi_nodes_lock);
-    // CTS flag from CP set to 1
-    if(cts_mspi_data_flag != 0)
-    {
-    /* Using blank backup buffer for transfer as Modem not ready to receive data*/
-        if(spi_data->ifx_tx_buffer != mspi_tx_buffer_backup)
-        {
-            spi_data->ifx_tx_buffer = mspi_tx_buffer_backup;
-        }
-
-#ifndef MSPI_NEXTMAXED
-        if(mspi_tx_buffer_data_count < MSPI_MAX_DATALOAD)
-        {
-                mspi_data_tx_next_len = mspi_tx_buffer_data_count;
-        }
-        else
-        {
-                mspi_data_tx_next_len = MSPI_MAX_DATALOAD;
-        }
-#else
-        mspi_data_tx_next_len = MSPI_MAX_DATALOAD;
-#endif
-
-
-        ifx_spi_header_set_info(spi_data->ifx_tx_buffer, 0, mspi_data_tx_next_len);
+	int status = 0;
+	struct mdm_spi_data *spi_data;
+	int i;
+	bool bfound = false;
+    
+	//prevent duplicated open of this driver by mux
+	if (atomic_read(&spi_table[tty->index].in_use) == 1) {
+		printk(KERN_ERR "%s: spi already open, Open failed!!!\n", __func__);
+		return -1;
+	}
+    
+	//process only when 'spi_table[tty->index].allocated' is set to 1 in  mdm_spi_probe
+	if (spi_table[tty->index].allocated) {
+		//increase assign_num only in mdm_spi_probe
+		for (i = 0; i < assign_num; i++) {
+			if (gspi_data[i]->index == tty->index) {
+				bfound = true;
+				break;
+			}
+		}
         
-        mspi_data_tx_next_len += MSPI_HEADER_SIZE;
-        mspi_data_tx_next_len = ALIGN(mspi_data_tx_next_len, MSPI_DMA_ALIGN);
-    }
-    else // CTS flag from CP set to 0
-    {
-        n_data_to_tx_len = mspi_curr_dma_data_len - MSPI_HEADER_SIZE;
-        n_remaining_tx_buffer_len = mspi_tx_buffer_end - mspi_tx_buffer_pos - MSPI_HEADER_SIZE;
-        /* we are reaching the end of the TX buffer, will use TX space under _start position (-1 helper frame) 
-           data from the end of the TX buffer will be placed in the -1 frame, and the rest of the date already writen in the 0 frame by
-           the insert_item function */
-        if((n_remaining_tx_buffer_len < n_data_to_tx_len) && (mspi_tx_buffer_data_count > n_remaining_tx_buffer_len))
-        {
-            temp_p = mspi_tx_buffer_start + MSPI_HEADER_SIZE - n_remaining_tx_buffer_len;
-            memcpy(temp_p, mspi_tx_buffer_pos + MSPI_HEADER_SIZE, n_remaining_tx_buffer_len);
-            mspi_tx_buffer_pos = temp_p - MSPI_HEADER_SIZE;
-        }
-
-        if(mspi_tx_buffer_data_count <= n_data_to_tx_len)
-        {
-            n_data_to_tx_len = mspi_tx_buffer_data_count;
-            mspi_data_tx_next_len = 0;
-        }
-        else
-        {
-#ifndef MSPI_NEXTMAXED
-            if( (mspi_tx_buffer_data_count - n_data_to_tx_len) >= MSPI_MAX_DATALOAD)
-            {
-                mspi_data_tx_next_len = MSPI_MAX_DATALOAD;
-            }
-            else
-            {
-                mspi_data_tx_next_len = mspi_tx_buffer_data_count - n_data_to_tx_len;
-            }
-#else
-            mspi_data_tx_next_len = MSPI_MAX_DATALOAD;
+		if (bfound) {
+			spi_data = gspi_data[i];
+			spi_data->mdm_tty = tty;
+			tty->driver_data = spi_data;
+			mdm_spi_buffer_initialization(spi_data);
+			spi_data->throttle = 0;
+            
+			atomic_set(&spi_table[tty->index].in_use, 1);
+            
+			printk(KERN_ERR "%s: spi Open success!!!\n", __func__);
+            
+			TTYSPI_DEBUG_PRINT("%s: tty->index=%d, spi_data->index=:%d\n",
+                               __func__, tty->index, spi_data->index);
+            
+			//set spi transfer wait timeout function: intialize timer,
+			// register the timeout callback function,
+			// assign global_spi to spi_data->spi
+			hrtimer_init(&(spi_data->timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+			spi_data->timer.function = spi_timeout_cb_func;
+			global_spi = spi_data->spi;
+		} else {
+			printk(KERN_ERR "%s: failed - no matching spi found!!\n", __func__);
+			status = -1;
+		}
+	} else {
+		printk(KERN_ERR "%s: failed!!\n", __func__);
+		status = -1;
+	}
+    
+#ifdef SPI_STATISTICS_CHECK
+	spi_s_state = SPI_STAT_STATE_NO_TRANSACTION;
 #endif
-        }
-
-    /* the case when we are not reaching the end of TX buffer */
-        if((mux_tx_buffer_pos >= mspi_tx_buffer_pos) && (mux_tx_buffer_pos < (mspi_tx_buffer_pos + mspi_curr_dma_data_len)))
-        {
-            mux_tx_buffer_pos = mspi_tx_buffer_pos + mspi_curr_dma_data_len;
-            if(mux_tx_buffer_pos >= mspi_tx_buffer_end)
-                mux_tx_buffer_pos = mspi_tx_buffer_start + MSPI_HEADER_SIZE;
-        }
-
-        spi_data->ifx_tx_buffer = mspi_tx_buffer_pos;
-        /* set MSPI Header */
-        ifx_spi_header_set_info(spi_data->ifx_tx_buffer, n_data_to_tx_len, mspi_data_tx_next_len);
-
-        mspi_tx_buffer_data_count -= n_data_to_tx_len;
-
-        MSPI_DBG(7,"TS qdc: c_len=%d ,n_len=%d\n", n_data_to_tx_len ,mspi_data_tx_next_len);
-
-        if(mspi_data_tx_next_len != 0)
-        {
-            mspi_data_tx_next_len = ALIGN((mspi_data_tx_next_len + MSPI_HEADER_SIZE), MSPI_DMA_ALIGN);
-        }
-
-        if((mspi_tty_client_wakeup == 1) && (mspi_tx_buffer_data_count <= MSPI_TX_BUFFER_WTRMK_LOW))
-        {
-            mspi_tty_client_wakeup = 0;
-            spin_unlock_bh(&spi_nodes_lock);
-            tty_wakeup(spi_data->ifx_tty);
-            return;
-        }
-    }
-    spin_unlock_bh(&spi_nodes_lock);
-    return;
+    
+	return status;
 }
 
-/* returns
-  0 in case if mspi have data to transfer down (TX)
-  1 in case if nothing to send */
-static int mspi_queue_empty(void)
+/*
+ * Function closes an opened tty device driver when called from user space
+ */
+static void mdm_spi_close(struct tty_struct *tty, struct file *filp)
 {
-    int  ret = 0;
-    spin_lock_bh(&spi_nodes_lock);
-    if(mspi_tx_buffer_data_count <= 0)
-    {
-        MSPI_DBG(7,"TS q_e\n");
-        ret = 1;
-    }
-    spin_unlock_bh(&spi_nodes_lock);
-    return ret;
+#ifdef TX_BUFFER_QUEUE
+	struct mdm_spi_data *spi_data = (struct mdm_spi_data *)tty->driver_data;
+	int tx_anymore = 0;
+	int queue_count = 0;
+#endif
+    
+	//spi_data->mdm_tty = NULL;
+	//tty->driver_data = NULL;
+    
+	TTYSPI_DEBUG_PRINT("%s\n", __func__);
+    
+	if (!spi_table[tty->index].allocated)
+		return;
+    
+	//assign the value 0 to 'in_use', inactivating it and blocking additional write requests occuring from the workqueue
+	atomic_set(&spi_table[tty->index].in_use, 0);
+    
+#ifdef SPI_STATISTICS_CHECK
+	spi_s_state = SPI_STAT_STATE_NO_TRANSACTION;
+#endif
+    
+	//wait until spi_sync is finished
+	while (atomic_read(&spi_data->is_syncing) == 1) {
+		printk(KERN_INFO "%s: is spi_syncing \n", __func__);
+		msleep(500);
+	}
+    
+	//prevent calling NULL timer callback function after processing 'mdm_spi_close'
+	do {
+		//when the timer is currently active apply 1 ms of sleep
+		if (hrtimer_try_to_cancel(&(spi_data->timer)) == -1) {
+			//actual scheduling occurs through the execution of msleep(1)
+			msleep(1);
+		} else {
+			TTYSPI_DEBUG_PRINT("%s: hrtimer_try_to_cancel success!!!\n", __func__);
+			break;
+		}
+	} while (1);
+    
+	//this log is for checking whether 'flush_workqueue' is finished
+	TTYSPI_DEBUG_PRINT("%s: flush_workqueue()++ \n", __func__);
+    
+	//flush all threads currently queued in the workqueue
+	flush_workqueue(spi_data->mdm_wq);
+    
+	//this log is for checking whether 'flush_workqueue' is finished
+	TTYSPI_DEBUG_PRINT("%s: flush_workqueue()-- \n", __func__);
+    
+#ifdef TX_BUFFER_QUEUE
+	while ((0 !=
+            get_tx_pending_data(spi_data,
+                                &tx_anymore)) && (queue_count < MAX_SPI_DATA_QUEUE)) {
+                queue_count++;
+                TTYSPI_DEBUG_PRINT("%s: tx_buffer_queue_count:%d", __func__, queue_count);
+            }
+#endif
 }
 
-/* ################################################################################################################ */
+/*
+ * Function is called from user space to send data to MODEM, it setups the transmission, enable MRDY signal and
+ * waits for SRDY signal HIGH from MDOEM. Then starts transmission and reception of data to and from MODEM.
+ * Once data read from MODEM is transferred to TTY core flip buffers, then "mdm_read_write_completion" is set
+ * and this function returns number of bytes sent to MODEM
+ */
+#ifdef TX_BUFFER_QUEUE
+static int mdm_spi_write(struct tty_struct *tty, const unsigned char *buf, int count)
+{
+	struct mdm_spi_data *spi_data = (struct mdm_spi_data *)tty->driver_data;
+    
+	struct spi_data_send_struct *pSpiToSend;
+	struct spi_data_send_struct *curr_ptr;
+    
+	int queue_size = 0;
+	u8 *send = NULL;
+    
+	if (spi_data == NULL) {
+		printk(KERN_ERR "%s: no spi handle\n", __func__);
+		return 0;
+	}
+    
+	//do not execute mdm_spi_write when mdm_spi_close has been processed
+	if (atomic_read(&spi_table[spi_data->index].in_use) == 0) {
+		printk(KERN_ERR "%s: open ttyspi first(#%d)\n", __func__, spi_data->index);
+		return 0;
+	}
+    
+	//tty can be changable because of dual spi
+	spi_data->mdm_tty = tty;
+	spi_data->mdm_tty->low_latency = 1;
+    
+	if (!buf) {
+		printk(KERN_ERR "%s: Buffer is NULL\n", __func__);
+		return 0;
+	}
+	if (!count) {
+		printk(KERN_ERR "%s: Count is ZERO\n", __func__);
+		return 0;
+	}
+    
+	curr_ptr = spi_data_send_pending;
+	TTYSPI_DEBUG_PRINT("mdm_spi_write()++ curr_ptr=0x%x, index %d, tx_len= %d\n",
+                       (uint)curr_ptr, spi_data->index,
+                       count);
+    
+	if ((curr_ptr != NULL)
+	    && (curr_ptr->count > MAX_SPI_DATA_QUEUE)) {
+		//wait until completely processing "mdm_read_write" so that the buffer queue is filled
+		spi_data->is_waiting = true;
+		TTYSPI_DEBUG_PRINT("%s waiting start\n", __func__);
+		wait_for_completion(&spi_data->mdm_read_write_completion);
+		TTYSPI_DEBUG_PRINT("%s waiting end\n", __func__);
+		init_completion(&spi_data->mdm_read_write_completion);
+        
+		//printk(KERN_ERR "mdm_spi_write()-- ERROR curr_ptr=0x%x count=%d FULL", (uint)curr_ptr, curr_ptr->count);
+		//return 0;
+	}
+    
+	send = kmalloc(count, GFP_ATOMIC);
+    
+	//WBT #196463
+	if (NULL == send) {
+		printk(KERN_ERR "%s: memory allocation for 'send' failed!\n", __func__);
+		return 0;
+	}
+    
+	pSpiToSend = kmalloc(sizeof(struct spi_data_send_struct), GFP_ATOMIC);
+    
+	//WBT #196462, #196464
+	if (NULL == pSpiToSend) {
+		printk(KERN_ERR "%s: memory allocation for 'pSpiToSend' failed!\n", __func__);
+		//WBT #219191
+		if (send)
+			kfree(send);
+		return 0;
+	}
+    
+	memset((void *)pSpiToSend, 0, sizeof(struct spi_data_send_struct));
+	memcpy(send, buf, count);
+    
+	pSpiToSend->data = send;
+	pSpiToSend->size = count;
+    
+	spin_lock_irqsave(&spi_nodes_lock, spi_lock_flag);
+	pSpiToSend->next = spi_data_send_pending;
+    
+	if (spi_data_send_pending != NULL) {
+		spi_data_send_pending->prev = pSpiToSend;
+		queue_size = spi_data_send_pending->count;
+	} else {
+		queue_size = 0;
+	}
+    
+	spi_data_send_pending = pSpiToSend;
+	spi_data_send_pending->count = queue_size + 1;
+	spin_unlock_irqrestore(&spi_nodes_lock, spi_lock_flag);
+    
+	curr_ptr = spi_data_send_pending;
+    
+	TTYSPI_DEBUG_PRINT("mdm_spi_write()::  curr_ptr=0x%x count=%d \n", (uint)curr_ptr,
+                       curr_ptr->count);
+    
+	//prevent spi transmission being registered as workqueue event
+	if (atomic_read(&spi_table[spi_data->index].in_use) == 1)
+		queue_work(spi_data->mdm_wq, &spi_data->mdm_work);
+    
+	return count;
+}
+#else // TX_BUFFER_QUEUE
+static int mdm_spi_write(struct tty_struct *tty, const unsigned char *buf, int count)
+{
+	struct mdm_spi_data *spi_data = (struct mdm_spi_data *)tty->driver_data;
+    
+	TTYSPI_DEBUG_PRINT("%s(index=%d, %d size)\n", __func__, spi_data->index, count);
+    
+	spi_data->mdm_ret_count = 0;
+    
+	if (spi_data == NULL) {
+		printk(KERN_ERR "%s: no spi handle\n", __func__);
+		return 0;
+	}
+	spi_data->mdm_tty = tty;
+	spi_data->mdm_tty->low_latency = 1;
+	if (!buf) {
+		printk(KERN_ERR "%s: buffer is NULL\n", __func__);
+		return spi_data->mdm_ret_count;
+	}
+	if (!count) {
+		printk(KERN_ERR "%s: count is ZERO\n", __func__);
+		return spi_data->mdm_ret_count;
+	}
+	spi_data->mdm_master_initiated_transfer = 1;
+	spi_data->mdm_spi_buf = buf;
+	spi_data->mdm_spi_count = count;
+    
+	DISABLE_SRDY_IRQ(spi_data->spi->irq);
+	//mdm_spi_set_srdy_signal(spi_data->spi->master->bus_num, 1);
+#ifdef USE_SRDY
+	//prevent spi transmission being registered as workqueue event
+	if (atomic_read(&spi_table[spi_data->index].in_use) == 1)
+		queue_work(spi_data->mdm_wq, &spi_data->mdm_work);
+    
+#endif
+	wait_for_completion(&spi_data->mdm_read_write_completion);
+    
+	ENABLE_SRDY_IRQ(spi_data->spi->irq);
+	init_completion(&spi_data->mdm_read_write_completion);
+	return spi_data->mdm_ret_count; /* Number of bytes sent to the device */
+}
+#endif // TX_BUFFER_QUEUE
+
+
+/* This function should return number of free bytes left in the write buffer, in this case always return 2048 */
+static int mdm_spi_write_room(struct tty_struct *tty)
+{
+	return IFX_SPI_MAX_BUF_SIZE;
+}
+
+
+/* ######################################################################## */
+/* These two functions are to be used in future to implement flow control (RTS & CTS)*/
+/*static void
+ * mdm_spi_throttle(struct tty_struct *tty)
+ * {
+ *      unsigned int flags;
+ *      struct mdm_spi_data *spi_data = (struct mdm_spi_data *)tty->driver_data;
+ *      spi_data->mdm_tty = tty;
+ *      spin_lock_irqsave(&spi_data->spi_lock, flags);
+ *      spi_data->throttle = 1;
+ *      spin_unlock_irqrestore(&spi_data->spi_lock, flags);
+ * }
+ *
+ * static void
+ * mdm_spi_unthrottle(struct tty_struct *tty)
+ * {
+ *      unsigned int flags;
+ *      struct mdm_spi_data *spi_data = (struct mdm_spi_data *)tty->driver_data;
+ *      spi_data->mdm_tty = tty;
+ *      spin_lock_irqsave(&spi_data->spi_lock, flags);
+ *      spi_data->throttle = 0;
+ *      if( mdm_rx_buffer != NULL ){
+ *           tty_insert_flip_string(spi_data->mdm_tty, mdm_rx_buffer, valid_buffer_count);
+ *      }
+ *      spin_unlock_irqrestore(&spi_data->spi_lock, flags);
+ * }*/
+/* ######################################################################## */
+
+/* End of MDM SPI Operations */
+
+/* ######################################################################## */
 
 /* TTY - SPI driver Operations */
-static int ifx_spi_probe_hw_dependent(struct ifx_spi_data *spi_data)
+static int mdm_spi_probe(struct spi_device *spi)
 {
-    struct spi_device *spi = spi_data->spi;
-    int status = 0;
-
-    spi_data->mrdy_gpio = MSPI_MRDY_GPIO;
-    spi_data->srdy_gpio = MSPI_SRDY_GPIO;
-
-    if (gpio_request(spi_data->srdy_gpio, "ifx srdy") < 0)
-    {
-        printk(KERN_ERR "Can't get SRDY GPIO\n");
-    }
-    tegra_gpio_enable(spi_data->srdy_gpio);
-    gpio_direction_output(spi_data->srdy_gpio, 0);
+	int status;
+	struct mdm_spi_data *spi_data;
     
-
-    if (gpio_request(spi_data->mrdy_gpio, "ifx mrdy") < 0)
-    {
-        printk(KERN_ERR "Can't get MRDY GPIO\n");
-    }
-    tegra_gpio_enable(spi_data->mrdy_gpio);
-    gpio_direction_input(spi_data->mrdy_gpio);
-
-    spi->irq = gpio_to_irq(spi_data->mrdy_gpio);
-
-    /* Enable MRDY Interrupt request - If the MRDY signal is high then ifx_spi_handle_mrdy_irq() is called */
-    status = request_irq(spi->irq, ifx_spi_handle_mrdy_irq,  IRQF_TRIGGER_RISING, spi->dev.driver->name, spi_data);
-
-    enable_irq_wake(spi->irq);
-
-    spi_tegra_register_callback(spi, ifx_spi_ap_ready);
- 
-    return status;
-}
-
-static int ifx_spi_probe(struct spi_device *spi)
-{
-    int status;
-    struct ifx_spi_data *spi_data;
-    unsigned char wq_name[20];
-    static int index = 0;
-
-  if(index >= MSPI_DATA_TABLE_SIZE)
-  {
-        MSPI_DBG(5, "probe failed, too many devices, index = %d", index);
-    return -EBUSY;
-  }
-
-
-    /* Allocate SPI driver data */
-    spi_data = (struct ifx_spi_data*)kzalloc(sizeof(struct ifx_spi_data), GFP_KERNEL);
-    if (spi_data == NULL) return -ENOMEM;
-
-
-    dev_set_drvdata(&spi->dev,spi_data);
-    INIT_WORK(&spi_data->ifx_work,ifx_spi_handle_work);
-    INIT_WORK(&spi_data->ifx_free_irq_work, ifx_spi_handle_free_irq_work);
-    sprintf(wq_name, "spi_wq_%d", index);
-    spi_data->ifx_wq = create_singlethread_workqueue(wq_name);
-    if(spi_data->ifx_wq == NULL)
-    {
-        MSPI_ERR("TS failed to allocate workqueue %s\n",wq_name);
-    }
-
-    /* Configure SPI */
-    spi_data->spi = spi;
-    spi->mode = SPI_MODE_1;
-    spi->bits_per_word = 32;
-    spi->chip_select = 0;
-    spi->max_speed_hz = 30*1000*1000; //24Mhz
-    status = spi_setup(spi);
-
-    if(status < 0)
-    {
-        MSPI_ERR("TS failed to setup SPI \n");
-    }
-
-    status = ifx_spi_allocate_frame_memory(spi_data, MSPI_DEF_DATALOAD + MSPI_HEADER_SIZE);
-    if(status != 0)
-    {
-        MSPI_ERR("Failed to allocate memory for buffers");
-        return -ENOMEM;
-    }
-
-#ifdef WAKE_LOCK_RESUME
-    wake_lock_init(&spi_data->wake_lock, WAKE_LOCK_SUSPEND, "mspi_wake");
+	TTYSPI_DEBUG_PRINT("%s: (assign_num=%d)\n", __func__, assign_num);
+    
+	/* memory allocation for SPI driver data */
+	spi_data = kzalloc(sizeof(*spi_data), GFP_KERNEL);
+	if (!spi_data)
+		return -ENOMEM;
+    
+	status = mdm_spi_allocate_frame_memory(spi_data, IFX_SPI_FRAME_SIZE);
+	if (status != 0) {
+		printk(KERN_ERR "%s: Failed to allocate memory for buffers\n", __func__);
+		kfree(spi_data);
+		return -ENOMEM;
+	}
+    
+	dev_set_drvdata(&spi->dev, spi_data);
+	spin_lock_init(&spi_data->spi_lock);
+	INIT_WORK(&spi_data->mdm_work, mdm_spi_handle_work);
+    
+	/* workqueue thread must be created in the probe function
+	 * because of the mrdy interrupt coming from cp */
+	spi_data->mdm_wq = create_singlethread_workqueue("mdm6600");
+	if (!spi_data->mdm_wq)
+		printk(KERN_ERR "Failed to setup workqueue - mdm_wq \n");
+    
+	init_completion(&spi_data->mdm_read_write_completion);
+    
+#ifdef TX_BUFFER_QUEUE
+	spi_data->is_waiting = false;
 #endif
-
-    status = ifx_spi_probe_hw_dependent(spi_data);
-
-    if (status != 0)
-    {
-        MSPI_ERR("Failed to request IRQ for SRDY - IFX SPI Probe Failed \n");
-        ifx_spi_free_frame_memory(spi_data);
-        if(spi_data != NULL)
-        {
-            kfree(spi_data);
-        }
-        return status;
-    }
-
-    if(index == 0)
-    {
-        spi_data->pm_notifier.notifier_call = ifx_pm_notifier_event;
-        register_pm_notifier(&spi_data->pm_notifier);
-    }
-    ifx_spi_buffer_initialization(spi_data);
-    spi_data_table[index++] = spi_data;
-    status = 0;
-    MSPI_DBG(6,"ifx_probe [END] with status: %d \n", status);
-    return status;
-}
-
-static int
-ifx_spi_remove(struct spi_device *spi)
-{
-    struct ifx_spi_data *spi_data;
-    spi_data = spi_get_drvdata(spi);
-    spi_data->spi = NULL;
-    spi_set_drvdata(spi, NULL);
-
-    ifx_spi_free_frame_memory(spi_data);
-    if(spi_data != NULL){
-        kfree(spi_data);
-    }
-//  spi_data_table[spi->master->bus_num - 1] = NULL;
-    spi_data_table[MSPI_DEFAULT_TABLE_ENTRY] = NULL;
-    return 0;
-}
-
-static void ifx_spi_shutdown(struct spi_device *spi)
-{
-
-    struct ifx_spi_data *spi_data;
-    struct irq_desc *desc = irq_to_desc(spi->irq);
-
-    ifx_shutdown = 1;
-
-    spi_data= spi_get_drvdata(spi);
-
-    if(spi_data->spi->irq)
-    {
-        disable_irq(spi_data->spi->irq);
-        MSPI_DBG(6,"ifx_spi_shutdown: disable_irq\n");
-    }
-
-
-    if(spi_data->spi->irq && (desc!=NULL && desc->action))
-    {
-        if(in_interrupt())
-        {
-            queue_work(spi_data->ifx_wq, &(spi_data->ifx_free_irq_work));
-            MSPI_DBG(3,"ifx_spi_shutdown: called from irq context, free_irq delayed.\n");
-            if(spi->irq != spi_data->spi->irq)
-            {
-                MSPI_ERR("ifx_spi_shutdown: spi->irq = %d, spi_data->spi->irq =%d\n", spi->irq, spi_data->spi->irq);
-            }
-        }
-        else
-        {
-            free_irq(spi_data->spi->irq, spi_data);
-            MSPI_DBG(6,"ifx_spi_shutdown: free_irq\n");
-        }
-    }
-
-    MSPI_DBG(6,"ifx_spi_shutdown: completed\n");
-}
-
-static int ifx_pm_notifier_event(struct notifier_block *this,
-                                 unsigned long event, void *ptr)
-{
-    MSPI_DBG(5, "[SUSPEND] PM event %ld", event);
-
-    switch (event)
-    {
-    case PM_SUSPEND_PREPARE:
-        MSPI_DBG(6, "[SUSPEND] PM_SUSPEND_PREPARE received");
-
-        /* We got a notification about the phone preparing to suspend.
-           Set the entering suspend mode flag now */
-        mspi_issuspend = 1;
-
-        return NOTIFY_OK;
-    case PM_POST_SUSPEND:
-        MSPI_DBG(6, "[SUSPEND] PM_POST_SUSPEND received");
-        /* This flag can still be set in case the suspend was aborted */
-        if (mspi_issuspend)
-            ifx_spi_resume(NULL);
-
-        /* TODO: Maybe should move the code from ifx_spi_resume here */
-        return NOTIFY_OK;
-    }
-    return NOTIFY_DONE;
-}
-
-
-static int
-ifx_spi_suspend(struct spi_device *spi, pm_message_t mesg)
-{
-    MSPI_DBG(5,"[SUSPEND] %s called", __func__);
-
-    /* If we got an MRDY request during suspend mode setup - cancel suspend */
-    if(mspi_irq_pending)
-    {
-        MSPI_DBG(5, "[SUSPEND] %s return BUSY", __func__)
-        return -EBUSY;
-    }
-
-#ifdef MSPI_TEGRA_PMC_WAKEUP_PAD
-    {
-        void __iomem *pmc_base = IO_ADDRESS(TEGRA_PMC_BASE);
-        unsigned long reg;
-
-        reg = readl(pmc_base + PMC_WAKE_STATUS);
-
-        // Clear power key wakeup pad bit.
-        if (reg & WAKEUP_IFX_SRDY_MASK)
-        {
-            MSPI_DBG(5, "[SUSPEND] wakeup pad: 0x%lx", reg);
-            writel(WAKEUP_IFX_SRDY_MASK, pmc_base + PMC_WAKE_STATUS);
-        }
+    
+	//config srdy,mrdy gpio value according to hw revision
+		SPI1_SRDY = TEGRA_GPIO_PJ6;
+		SPI1_MRDY = TEGRA_GPIO_PU6;     //TEGRA_GPIO_PS1;
+		SPI2_SRDY = TEGRA_GPIO_PO5;     //TEGRA_GPIO_PO5;
+		SPI2_MRDY = TEGRA_GPIO_PO0;
+	
+    
+	/* configure SPI controller */
+	spi_data->spi = spi;
+	spi->mode = SPI_MODE_1 | SPI_CS_HIGH;
+	spi->bits_per_word = 32;
+    
+	/* get the spi bus id : ex) spi0.0 */
+	spi_data->index = spi->master->bus_num;
+    
+	/* configure SPI chip_select */
+	switch (spi_data->index) {
+        case 0:
+        case 1:
+            spi->chip_select = 0;
+            break;
+        case 2:
+            spi->chip_select = 2;
+            break;
+        default:
+            spi->chip_select = 0;
+            break;
+	}
+    
+	// must be set to 4 times the speed of the actual running clock
+	spi->max_speed_hz = 4 * 24 * 1000 * 1000;
+    
+	status = spi_setup(spi);
+    
+	printk(KERN_ERR "%s: (bus_num=%d)\n", __func__, spi->master->bus_num);
+	spi_tegra_register_callback(spi, mdm_spi_callback, (void *)&spi->master->bus_num);
+	if (status < 0)
+		printk(KERN_ERR "%s: Failed to setup SPI \n", __func__);
+    
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+	if (0 == spi_data->index) {
+#endif
+        /* SPI1_SRDY */
+        gpio_request(SPI1_SRDY, "ipc1_srdy");
+        tegra_gpio_enable(SPI1_SRDY);
+        gpio_direction_output(SPI1_SRDY, 0);
+        
+        /* SPI1_MRDY */
+        gpio_request(SPI1_MRDY, "ipc1_mrdy");
+        tegra_gpio_enable(SPI1_MRDY);
+        gpio_direction_input(SPI1_MRDY);
+        spi->irq = gpio_to_irq(SPI1_MRDY);
+        
+        TTYSPI_DEBUG_PRINT("irq = %d, name = %s\n", spi->irq, spi->dev.driver->name);
+        status =
+		request_irq(spi->irq, mdm_spi_handle_mrdy_irq, IRQF_TRIGGER_RISING,
+                    spi->dev.driver->name,
+                    spi_data);
+        
+        // set irq_wake only when modem is connected
+        irq_set_irq_wake(spi->irq, !!is_modem_connected());
+        
+        // set the SPI2_MRDY gpio pin as an ap_suspend_state gpio pin  for checking the suspend state of the ap
+        gpio_request(SPI2_MRDY, "ap_suspend_state");
+        tegra_gpio_enable(SPI2_MRDY);
+        gpio_direction_output(SPI2_MRDY, 0);
+        
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+    } else {
+        /* SPI2_SRDY */
+        gpio_request(SPI2_SRDY, "ipc2_srdy");
+        tegra_gpio_enable(SPI2_SRDY);
+        gpio_direction_output(SPI2_SRDY, 0);
+        
+        /* SPI2_MRDY */
+        gpio_request(SPI2_MRDY, "ipc2_mrdy");
+        tegra_gpio_enable(SPI2_MRDY);
+        gpio_direction_input(SPI2_MRDY);
+        spi->irq = gpio_to_irq(SPI2_MRDY);
+        
+        TTYSPI_DEBUG_PRINT("irq = %d, name = %s\n", spi->irq, spi->dev.driver->name);
+        status =
+		request_irq(spi->irq, mdm_spi_handle_mrdy_irq, IRQF_TRIGGER_RISING,
+                    spi->dev.driver->name,
+                    spi_data);
     }
 #endif
-
-    return 0;
+    
+	if (status != 0) {
+		printk(KERN_ERR "Failed to request IRQ for MRDY\n");
+		printk(KERN_ERR "%s: Failed\n", __func__);
+		if (spi_data->mdm_tx_buffer)
+			kfree(spi_data->mdm_tx_buffer);
+		if (spi_data->mdm_rx_buffer)
+			kfree(spi_data->mdm_rx_buffer);
+		if (spi_data)
+			kfree(spi_data);
+		return status;
+	}
+	spi_data->mdm_master_initiated_transfer = 0;
+    
+	gspi_data[assign_num] = spi_data;
+    
+	//mdm_spi_sync_read_write(spi_data, IFX_SPI_HEADER_SIZE); /* 4 bytes for header */
+	spi_table[spi_data->index].allocated = 1;
+	/* increase assigned number of spi driver */
+	assign_num++;
+    
+	// enable gpios for modem shutdown
+	tegra_gpio_enable(GPIO_CP_STATE);
+	tegra_gpio_enable(GPIO_IFX_RESET_1V8_N);
+	tegra_gpio_enable(GPIO_IFX_PWRON_1V8);
+    
+	gpio_request_one(GPIO_CP_STATE, GPIOF_IN, "cp_state");
+	gpio_request_one(GPIO_IFX_RESET_1V8_N, GPIOF_OUT_INIT_LOW, "modem_reset_n");
+	gpio_request_one(GPIO_IFX_PWRON_1V8, GPIOF_OUT_INIT_LOW, "modem_pwron");
+    
+#ifdef CONFIG_HAS_WAKELOCK
+	wake_lock_init(&spi_data->spi_wakelock, WAKE_LOCK_SUSPEND, "spi_wakelock");
+#endif
+    
+#ifdef SPI_STATISTICS_CHECK
+	if (status == 0) {
+		int ret = 0;
+		TTYSPI_DEBUG_PRINT("%s: statistics timer setting !!\n", __func__);
+		setup_timer(&spi_statistics_timer, spi_statistic_cb_func, 0);
+		ret =
+        mod_timer(&spi_statistics_timer,
+				  round_jiffies(jiffies + SPI_STAT_POLL_PERIOD * HZ));
+		if (ret) printk(KERN_ERR "%s: Error in mod_timer !!\n", __func__);
+	}
+#endif
+	TTYSPI_DEBUG_PRINT(KERN_INFO "%s: end\n", __func__);
+    
+	return status;
 }
 
-static int
-ifx_spi_resume(struct spi_device *spi)
+static int mdm_spi_remove(struct spi_device *spi)
 {
-    mspi_issuspend = 0;
-
-    MSPI_DBG(5, "[SUSPEND] %s called", __func__);
-
-#ifdef MSPI_TEGRA_PMC_WAKEUP_PAD
-
-    /* TODO: Do we really need this? Pending IRQs will be handled after suspend exit anyway */
-    {
-        void __iomem *pmc_base = IO_ADDRESS(TEGRA_PMC_BASE);
-        unsigned long reg;
-
-        reg = readl(pmc_base + PMC_WAKE_STATUS);
-
-        if ((reg & WAKEUP_IFX_SRDY_MASK) || mspi_irq_pending)
-        {
-            mspi_irq_pending = false;
-            MSPI_DBG(5, "[SUSPEND] wakeup pad: 0x%lx", reg);
-
-#ifdef WAKE_LOCK_RESUME
-            if(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock)
-                wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
+	struct mdm_spi_data *spi_data;
+    
+	//WBT #219190
+	spi_data = spi_get_drvdata(spi);
+    
+#ifdef CONFIG_HAS_WAKELOCK
+	wake_lock_destroy(&spi_data->spi_wakelock);
 #endif
+    
+	spin_lock_irq(&spi_data->spi_lock);
+	spi_data->spi = NULL;
+	spi_set_drvdata(spi, NULL);
+	spin_unlock_irq(&spi_data->spi_lock);
+    
+	if (spi_data->mdm_tx_buffer)
+		kfree(spi_data->mdm_tx_buffer);
+	if (spi_data->mdm_rx_buffer)
+		kfree(spi_data->mdm_rx_buffer);
+	if (spi_data)
+		kfree(spi_data);
+	return 0;
+}
 
-            queue_work(spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->ifx_wq, &spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->ifx_work);
-        }
-    }
+/*
+ * Power down modem(CP)
+ * return 0 : success to power down modem
+ */
+static int modem_powerdown(void)
+{
+	int level;
+    
+	// set power on high for a while to simulate power key pressed at modem
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 1);
+	mdelay(2300);
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 0);
+    
+	// check CP state if modem(CP) is turned off
+	mdelay(6000);
+	level = gpio_get_value(GPIO_CP_STATE);
+    
+	printk(KERN_INFO "%s: CP STATE pin is %d\n", __func__, level);
+    
+	return 0 == level ? 0 : -1;
+}
 
+/* reset modem */
+// LGE_UPDATE_S CP Reset & Response halt Recovery
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+void modem_reset(void)
+{
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 1);
+	mdelay(500);
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 0);
+	mdelay(10);
+	gpio_set_value(GPIO_IFX_RESET_1V8_N, 1);
+	mdelay(500);
+	gpio_set_value(GPIO_IFX_RESET_1V8_N, 0);
+}
+EXPORT_SYMBOL_GPL(modem_reset);
 #else
+static void modem_reset(void)
+{
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 1);
+	mdelay(500);
+	gpio_set_value(GPIO_IFX_PWRON_1V8, 0);
+	mdelay(10);
+	gpio_set_value(GPIO_IFX_RESET_1V8_N, 1);
+	mdelay(500);
+	gpio_set_value(GPIO_IFX_RESET_1V8_N, 0);
+}
+#endif
+// LGE_UPDATE_E CP Reset & Response halt Recovery
 
-    if (mspi_irq_pending)
-    {
-        mspi_irq_pending = false;
-        MSPI_DBG(5, "[SUSPEND] IRQ is pending: queue transfer");
+static void mdm_spi_shutdown(struct spi_device *spi)
+{
+	int retry = 3; // retry count
+    
+	//TTYSPI_DEBUG_PRINT("%s()\n", __func__);
+    
+	//When there is unknonw modem state, this GPIO would make leakage voltage to CPU.
+	//Because of the leakage voltage, the system can not boot up by POWER Button.
+	//To prevent this issue, the SPI1_SRDY pin will be changed from OUTPUT to INPUT at SHUTDOWN.
+	gpio_direction_input(SPI1_SRDY);
+    
+	// if modem is not connected, return
+	if (!is_modem_connected())
+		return;
+    
+	// power down modem by gpio
+	disable_mdm_irq();
+	while (0 != modem_powerdown() && retry > 0) {
+		retry--;
+		modem_reset();
+		mdelay(6000); // wait until CP reboot
+	}
+}
 
-#ifdef WAKE_LOCK_RESUME
-        if(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock)
-            wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
+#ifdef CONFIG_PM
+static int mdm_spi_suspend(struct spi_device *spi, pm_message_t mesg)
+{
+	struct mdm_spi_data *spi_data;
+	unsigned long flags;
+    
+	TTYSPI_DEBUG_PRINT("%s()\n", __func__);
+    
+	spi_data = spi_get_drvdata(spi);
+    
+	//prevent duplicated access to 'spi_data->is_suspended'
+	spin_lock_irqsave(&spi_data->spi_lock, flags);
+	spi_data->is_suspended = 1;
+	spin_unlock_irqrestore(&spi_data->spi_lock, flags);
+    
+	TTYSPI_DEBUG_PRINT("%s: (is_suspend=%d)\n", __func__, spi_data->is_suspended);
+    
+	//if modem is connected, give info 'ap_suspend_state' to cp
+	if (is_modem_connected()) {
+		//set 'ap_suspend_state' gpio value to 'true'
+		gpio_set_value(SPI2_MRDY, spi_data->is_suspended);
+		TTYSPI_DEBUG_PRINT("%s: (gpio=%d, ap_suspend_state=%d)\n", __func__, SPI2_MRDY,
+                           gpio_get_value(
+                                          SPI2_MRDY));
+	}
+    
+#if 0   //remove 'flush_workqueue' to fix pending of AT CMD on "SCREEN OFF"
+	//if modem is connected and communicating, flush all threads currently queued
+	if (is_modem_connected() && is_modem_communicating()) {
+		//flush all threads currently queued in the workqueue
+		//flush_workqueue(spi_data->mdm_wq);
+	}
+#endif
+    
+	//if modem is removed, disable ap wakeup
+	if (!is_modem_connected())
+		irq_set_irq_wake(spi->irq, 0);
+    
+	return 0;
+}
+
+static int mdm_spi_resume(struct spi_device *spi)
+{
+	struct mdm_spi_data *spi_data;
+	unsigned long flags;
+    
+	TTYSPI_DEBUG_PRINT("%s()\n", __func__);
+    
+	spi_data = spi_get_drvdata(spi);
+    
+	//prevent duplicated access to 'spi_data->is_suspended'
+	spin_lock_irqsave(&spi_data->spi_lock, flags);
+	spi_data->is_suspended = 0;
+	spin_unlock_irqrestore(&spi_data->spi_lock, flags);
+    
+	TTYSPI_DEBUG_PRINT("%s: (is_suspend=%d)\n", __func__, spi_data->is_suspended);
+    
+	//if modem is connected, give info 'ap_suspend_state' to cp
+	if (is_modem_connected()) {
+		//set ap_suspend state gpio value to 'false'
+		gpio_set_value(SPI2_MRDY, spi_data->is_suspended);
+		TTYSPI_DEBUG_PRINT("%s: (gpio=%d, ap_suspend_state=%d)\n", __func__, SPI2_MRDY,
+                           gpio_get_value(
+                                          SPI2_MRDY));
+	}
+    
+	return 0;
+}
 #endif
 
-        queue_work(spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->ifx_wq, &spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->ifx_work);
-    }
-
-#endif /* MSPI_TEGRA_PMC_WAKEUP_PAD */
-
-
-    return 0;
-}
 /* End of TTY - SPI driver Operations */
 
-#ifdef SPI2SPI_TEST
-static int spi2spi_start_test(struct ifx_spi_data *spi_data)
-{
-    unsigned long flag;
-    if(s2s_test.xfer_size > 0)
-    {
-        spi2spi_buff_size = ALIGN(s2s_test.xfer_size + MSPI_HEADER_SIZE,MSPI_DMA_ALIGN);
-    }
-    if (s2s_test.testcase == 1 || s2s_test.testcase == 3) {
-        spi2spi_tx_buff = kmalloc(spi2spi_buff_size, GFP_KERNEL | GFP_DMA);
-        MSPI_DBG(9,"spi2spi_start_test allocated TX buf %d\n", spi2spi_buff_size);
-        if (spi2spi_tx_buff == NULL) {
-            MSPI_ERR("spi2spi_test: failed to allocate tx_buf");
-            goto out;
-        }
-        memset(spi2spi_tx_buff,0,MSPI_HEADER_SIZE);
-    }
-    else
-    {
-        spi2spi_tx_buff = NULL;
-    }
+/* ######################################################################## */
 
-    spi2spi_rx_buff = kmalloc(spi2spi_buff_size, GFP_KERNEL | GFP_DMA);
-    MSPI_DBG(9,"spi2spi_start_test allocated RX buf %d\n", spi2spi_buff_size);
-    if (spi2spi_rx_buff == NULL) {
-        MSPI_ERR("spi2spi_test: failed to allocate rx_buf");
-        goto out;
-    }
-    memset(spi2spi_rx_buff,0,MSPI_HEADER_SIZE);
-
-    spin_lock_irqsave(&spi2spi_lock,flag);
-    spi2spi_test_is_running = 1;
-    spin_unlock_irqrestore(&spi2spi_lock,flag);
-
-    if (spi_data->ifx_wq != NULL){
-        cancel_work_sync(&(spi_data->ifx_work));
-        destroy_workqueue(spi_data->ifx_wq);
-        spi_data->ifx_wq = NULL;
-    }
-
-    INIT_WORK(&spi_data->ifx_work,ifx_spi2spi_handle_work);
-    spi_data->ifx_wq = create_singlethread_workqueue("spi2spi_test_wq");
-    if(spi_data->ifx_wq == NULL)
-    {
-        MSPI_ERR("TS failed to allocate spi2spi test workqueue\n");
-    }
-    else
-    {
-        MSPI_DBG(9,"spi2spi_start_test start work \n");
-        queue_work(spi_data->ifx_wq, &spi_data->ifx_work);
-        return 0;
-    }
-
-out:
-    MSPI_DBG(9,"spi2spi_start_test error \n");
-    if(spi2spi_tx_buff != NULL)
-    {
-        kfree(spi2spi_tx_buff);
-        spi2spi_tx_buff = NULL;
-    }
-    if(spi2spi_rx_buff != NULL)
-    {
-        kfree(spi2spi_rx_buff);
-        spi2spi_rx_buff = NULL;
-    }
-    return -ENOMEM;
-}
-#endif //SPI2SPI_TEST
-
-static void mspi_tx_buffer_flush(struct ifx_spi_data *spi_data)
-{
-    MSPI_DBG(2, "%s called", __FUNCTION__);
-    mutex_lock(&mspi_transfer_lock);
-    MSPI_DBG(4, "mspi_transfer_lock locked");
-    spin_lock_bh(&spi_nodes_lock);
-    MSPI_DBG(4, "spi_nodes_lock locked");
-    mspi_tx_buffer_pos              = mspi_tx_buffer_start;
-    mux_tx_buffer_pos               = mspi_tx_buffer_start + (int)MSPI_HEADER_SIZE;
-    mspi_tx_buffer_data_count       = 0;
-    mspi_tx_buffer_backup           = mspi_tx_buffer_end;
-    memset(mspi_tx_buffer_backup,0,MSPI_MAX_BUFF_SIZE);
-    spin_unlock_bh(&spi_nodes_lock);
-    mutex_unlock(&mspi_transfer_lock);
-
-    MSPI_DBG(3, "%s end", __FUNCTION__);
-}
-
-static void mspi_rx_buffer_flush(struct ifx_spi_data *spi_data)
-{
-    MSPI_DBG(2, "%s called", __FUNCTION__);
-
-    mutex_lock(&mspi_transfer_lock);
-    MSPI_DBG(4, "mspi_transfer_lock locked");
-    mutex_lock(&mspi_rx_flush_lock);
-    MSPI_DBG(4, "mspi_rx_flush_lock locked");
-    if(mspi_rx_wq)
-    {
-        flush_workqueue(mspi_rx_wq);
-        MSPI_DBG(4, "mspi_rx_wq flushed");
-        spin_lock_bh(&mux_rx_buff_lock);
-        spi_data->ifx_rx_buffer     = mspi_rx_buffer_start;
-        mux_rx_buffer_curr_size     = 0;
-        spin_unlock_bh(&mux_rx_buff_lock);
-    }
-    mutex_unlock(&mspi_rx_flush_lock);
-    mutex_unlock(&mspi_transfer_lock);
-
-    MSPI_DBG(3, "%s end", __FUNCTION__);
-}
-
-int ifx_spi_ioctl(struct tty_struct *tty,
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39))
-                  struct file * file,
+static struct spi_driver mdm_spi_driver = {
+	.driver		={
+		.name	= "mdm6600",
+		.bus	= &spi_bus_type,
+		.owner	= THIS_MODULE,
+	},
+	.probe		= mdm_spi_probe,
+	.remove		= __devexit_p(mdm_spi_remove),
+	.shutdown	= mdm_spi_shutdown,
+#ifdef CONFIG_PM
+	.suspend	= mdm_spi_suspend,
+	.resume		= mdm_spi_resume,
 #endif
-                  unsigned int cmd, unsigned long arg)
-{
-    int retval = 0;
-    struct ifx_spi_data *spi_data;
-    spi_data = tty->driver_data;
-    if (spi_data == NULL)
-        return -ENODEV;
-
-    switch (cmd) {
-#ifdef SPI2SPI_TEST
-        case TIOCSPI2SPISTART:
-            MSPI_DBG(9," TIOCSPI2SPISTART ");
-            if (copy_from_user(&s2s_test, (void __user *)arg, sizeof(s2s_test)))
-            {
-                MSPI_DBG(8," TIOCSPI2SPISTART FAIL ");
-                return -EIO;
-            }
-            retval = spi2spi_start_test(spi_data);
-            break;
-        case TIOCSPI2SPISTOP:
-            // TODO stop
-            MSPI_DBG(9," TIOCSPI2SPISTOP ");
-            spin_lock_bh(&spi2spi_lock);
-            spi2spi_test_is_running = 0;
-            if(spi2spi_tx_buff != NULL)
-            {
-                kfree(spi2spi_tx_buff);
-                spi2spi_tx_buff = NULL;
-            }
-            if(spi2spi_rx_buff != NULL)
-            {
-                kfree(spi2spi_rx_buff);
-                spi2spi_rx_buff = NULL;
-            }
-            spin_unlock_bh(&spi2spi_lock);
-            break;
-        case TIOCGSTAT:
-            {
-            struct spi2spi_stat stat;
-            struct timespec ts;
-            MSPI_DBG(9," TIOCGSTAT ");
-
-            spin_lock_bh(&spi2spi_lock);
-            stat.counter = spi2spi_counter;
-            spin_unlock_bh(&spi2spi_lock);
-            ts = current_kernel_time();
-            stat.timestamp = ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-            if (copy_to_user((void*)arg, &stat, sizeof stat))
-                return -EIO;
-            }
-            break;
-#endif //SPI2SPI_TEST
-        default:
-        MSPI_DBG(9,"ifx_spi_ioctl: No such ioctl %x", cmd);
-        return -ENOIOCTLCMD;
-        break;
-    }
-    return retval;
-}
-
-/* ################################################################################################################ */
-
-static struct spi_driver ifx_spi_driver = {
-    .driver = {
-        .name   = "mdm6600",
-        .bus    = &spi_bus_type,
-        .owner  = THIS_MODULE,
-    },
-    .probe      = ifx_spi_probe,
-    .remove     = __devexit_p(ifx_spi_remove),
-    .shutdown   = ifx_spi_shutdown,
-    .suspend    = ifx_spi_suspend,
-    .resume     = ifx_spi_resume,
 };
 
 /*
- * Structure to specify tty core about tty driver operations supported in TTY SPI driver.
+ * Structure to specify info for the tty core about tty driver operations supported in TTY SPI driver.
  */
-static const struct tty_operations ifx_spi_ops = {
-    .open               = ifx_spi_open,
-    .close              = ifx_spi_close,
-    .write              = ifx_spi_write,
-    .write_room         = ifx_spi_write_room,
-    .ioctl              = ifx_spi_ioctl,
-    .chars_in_buffer    = ifx_spi_chars_in_buffer,
-    .throttle           = ifx_spi_throttle,
-    .unthrottle         = ifx_spi_unthrottle,
-    .flush_buffer       = ifx_spi_flush_buffer,
-    .hangup             = ifx_spi_hangup,
-    .set_ldisc          = ifx_spi_set_ldisc,
-    .tiocmget           = ifx_spi_tiocmget
+static const struct tty_operations mdm_spi_ops = {
+	.open		= mdm_spi_open,
+	.close		= mdm_spi_close,
+	.write		= mdm_spi_write,
+	.write_room	= mdm_spi_write_room,
+	//.throttle = mdm_spi_throttle,
+	//.unthrottle = mdm_spi_unthrottle,
+	//.set_termios = mdm_spi_set_termios,
 };
 
-/* ################################################################################################################ */
+/* ######################################################################## */
 
 /*
- * Intialize frame sizes as "MSPI_DEF_DATALOAD" bytes for first SPI frame transfer
+ * Intialize frame sizes as "IFX_SPI_DEFAULT_BUF_SIZE"(2044) bytes for first SPI frame transfer
  */
-static void
-ifx_spi_buffer_initialization(struct ifx_spi_data *spi_data)
+static void mdm_spi_buffer_initialization(struct mdm_spi_data *spi_data)
 {
-    spi_data->ifx_receiver_buf_size = MSPI_DEF_DATALOAD;
-    mspi_curr_dma_data_len = MSPI_DEF_BUFF_SIZE;
-}
-
-/*
- * Allocate memeory for TX_BUFFER and RX_BUFFER
- */
-static int
-ifx_spi_allocate_frame_memory(struct ifx_spi_data *spi_data, unsigned int memory_size)
-{
-    int status = 0;
-
-    spi_data->ifx_tx_buffer = kmalloc(MSPI_MAX_BUFF_SIZE * (MSPI_MAX_TX_FRAME_BUFS + 2) , GFP_KERNEL | GFP_DMA);
-    if (spi_data->ifx_tx_buffer == NULL)
-    {
-        status = -ENOMEM;
-    }
-    else
-    {
-        mspi_tx_buffer_start            = spi_data->ifx_tx_buffer + (int)MSPI_MAX_BUFF_SIZE;
-        mspi_tx_buffer_end              = spi_data->ifx_tx_buffer + (int)((int)MSPI_MAX_BUFF_SIZE * (int)(MSPI_MAX_TX_FRAME_BUFS + 1));
-        mspi_tx_buffer_pos              = mspi_tx_buffer_start;
-        mux_tx_buffer_pos               = mspi_tx_buffer_start + (int)MSPI_HEADER_SIZE;
-        mspi_tx_buffer_data_count       = 0;
-        mspi_tx_buffer_backup           = mspi_tx_buffer_end;
-        memset(mspi_tx_buffer_backup,0,MSPI_MAX_BUFF_SIZE);
-    }
-
-    spi_data->ifx_rx_buffer = kmalloc( MSPI_RX_BUFFER_SIZE , GFP_KERNEL | GFP_DMA);
-    if (spi_data->ifx_rx_buffer == NULL)
-    {
-        status = -ENOMEM;
-    } else {
-        mspi_rx_buffer_start            = spi_data->ifx_rx_buffer;
-        mspi_rx_buffer_end              = spi_data->ifx_rx_buffer + (int)MSPI_RX_BUFFER_SIZE;
-        mux_rx_buffer_curr_size         = 0;
-    }
-
-    if(status == -ENOMEM){
-        MSPI_ERR("Open Failed ENOMEM\n");
-        if(spi_data->ifx_tx_buffer != NULL)
-        {
-            kfree(spi_data->ifx_tx_buffer);
-            mspi_tx_buffer_start            = NULL;
-            mspi_tx_buffer_end              = NULL;
-            mux_tx_buffer_pos               = NULL;
-            mspi_tx_buffer_data_count       = 0;
-            mspi_tx_buffer_backup           = NULL;
-            mspi_tx_buffer_pos              = NULL;
-        }
-        if(spi_data->ifx_rx_buffer != NULL)
-        {
-            kfree(spi_data->ifx_rx_buffer);
-            mspi_rx_buffer_start            = NULL;
-            mspi_rx_buffer_end              = NULL;
-            mux_rx_buffer_curr_size         = 0;
-        }
-    }
-    return status;
-}
-static void
-ifx_spi_free_frame_memory(struct ifx_spi_data *spi_data)
-{
-    if(mspi_tx_buffer_start != NULL)
-    {
-        kfree((mspi_tx_buffer_start - (int)MSPI_MAX_BUFF_SIZE));
-        mspi_tx_buffer_start            = NULL;
-        mspi_tx_buffer_end              = NULL;
-        mux_tx_buffer_pos               = NULL;
-        mspi_tx_buffer_data_count       = 0;
-        mspi_tx_buffer_backup           = NULL;
-        mspi_tx_buffer_pos              = NULL;
-    }
-    if(mspi_rx_buffer_start != NULL)
-    {
-        kfree(mspi_rx_buffer_start);
-        mspi_rx_buffer_start            = NULL;
-        mspi_rx_buffer_end              = NULL;
-        mux_rx_buffer_curr_size         = 0;
-    }
-}
-
-/*
- * Function to set header information according to IFX SPI framing protocol specification
- */
-static void
-ifx_spi_header_set_info(unsigned char *header_buffer, unsigned int curr_buf_size, unsigned int next_buf_size)
-{
-    struct ifx_spi_frame_header *header = (struct ifx_spi_frame_header *)header_buffer;
-
-    memset(header_buffer,0,MSPI_HEADER_SIZE);
-
-    header->curr_data_size = curr_buf_size;
-  
-    if(next_buf_size > 0)
-    {
-        header->more = 1;
-        header->next_data_size = next_buf_size;
-    }
-  
-    if(rts_mspi_data_flag != 0)
-    {
-        header->cts_rts = 1;
-    }
-}
-
-/*
- * Function to set header information according to IFX SPI framing protocol specification
- */
-static void
-ifx_spi_header_update_curr_size(unsigned char *header_buffer, unsigned int curr_buf_size)
-{
-    struct ifx_spi_frame_header *header = (struct ifx_spi_frame_header *)header_buffer;
-    header->curr_data_size = curr_buf_size;
-}
-
-/*
- * Function to set header information according to IFX SPI framing protocol specification
- */
-static void
-ifx_spi_header_update_next_size(unsigned char *header_buffer, unsigned int next_buf_size)
-{
-    struct ifx_spi_frame_header *header = (struct ifx_spi_frame_header *)header_buffer;
-    if(next_buf_size > 0)
-    {
-        header->more = 1;
-        header->next_data_size = next_buf_size;
-    }
-    else
-    {
-        header->more = 0;
-        header->next_data_size = 0;
-    }
-}
-
-/*
- * Function to get header information according to IFX SPI framing protocol specification
- * returns
- * number of bytes ready for the next transfer (RX)
- */
-static void
-ifx_spi_header_get_info(unsigned char *header_buffer, unsigned int *curr_buf_size, unsigned int *next_buf_size)
-{
-    struct ifx_spi_frame_header *header = (struct ifx_spi_frame_header *)header_buffer;
-    *curr_buf_size = header->curr_data_size;
-  *next_buf_size = header->more == 1 ? header->next_data_size : 0;
-}
-
-/*
- * Function to get header information according to IFX SPI framing protocol specification
- */
-static inline int
-ifx_spi_header_get_more_flag(unsigned char *rx_buffer)
-{
-    return ((struct ifx_spi_frame_header *)rx_buffer)->more;
-}
-
-/*
- * Function to get header information according to IFX SPI framing protocol specification
- */
-static inline int
-ifx_spi_header_get_cts_flag(unsigned char *rx_buffer)
-{
-    return ((struct ifx_spi_frame_header *)rx_buffer)->cts_rts;
-}
-
-static void mspi_rx_task(struct work_struct *pwork)
-{
-    struct mspi_rx_work *work = container_of(pwork, struct mspi_rx_work, work);
-
-    if(mutex_trylock(&mspi_rx_flush_lock))
-    {
-        MSPI_DBG(4, "%s processing the data", __func__);
-   
-#ifdef USE_TTY_INSERT
-        // Ensure that tty does have enough space to receive packet, otherwise wait for unthrottle
-        while(tty_buffer_request_room(work->ifx_tty, work->len) < work->len)
-        {
-            MSPI_DBG(9, "not enough receive room");
-            set_bit(TTY_THROTTLED, &work->ifx_tty->flags);
-            while(down_interruptible(&mspi_rx_completion) != 0) {};
-        }
-        tty_insert_flip_string(work->ifx_tty, work->mspi_rx_buffer, work->len);
-        tty_flip_buffer_push(work->ifx_tty);
+	spi_data->mdm_sender_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
+	spi_data->mdm_receiver_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
     
+	spi_data->mdm_spi_buf = NULL;
+	spi_data->mdm_spi_count = 0;
+}
+
+/*
+ * Allocate memory for TX_BUFFER and RX_BUFFER
+ */
+static int mdm_spi_allocate_frame_memory(struct mdm_spi_data *	spi_data,
+                                         unsigned int		memory_size)
+{
+	int status = 0;
+    
+	TTYSPI_DEBUG_PRINT("%s: (assign_num=%d)\n", __func__, assign_num);
+    
+	spi_data->mdm_rx_buffer = kmalloc(memory_size + IFX_SPI_HEADER_SIZE, GFP_KERNEL);
+	if (!spi_data->mdm_rx_buffer) {
+		printk(KERN_ERR "Open Failed ENOMEM\n");
+		status = -ENOMEM;
+	}
+	spi_data->mdm_tx_buffer = kmalloc(memory_size + IFX_SPI_HEADER_SIZE, GFP_KERNEL);
+	if (!spi_data->mdm_tx_buffer) {
+		printk(KERN_ERR "Open Failed ENOMEM\n");
+		status = -ENOMEM;
+	}
+	if (status == -ENOMEM) {
+		if (spi_data->mdm_tx_buffer)
+			kfree(spi_data->mdm_tx_buffer);
+		if (spi_data->mdm_rx_buffer)
+			kfree(spi_data->mdm_rx_buffer);
+	}
+	return status;
+}
+
+/*
+ * Function to set header information according to IFX SPI framing protocol specification
+ */
+static void mdm_spi_set_header_info(unsigned char *header_buffer, unsigned int curr_buf_size,
+                                    unsigned int next_buf_size)
+{
+	int i;
+	union mdm_spi_frame_header header;
+    
+	for (i = 0; i < 4; i++)
+		header.framesbytes[i] = 0;
+    
+	header.mdm_spi_header.curr_data_size = curr_buf_size;
+	if (next_buf_size) {
+		header.mdm_spi_header.more = 1;
+		header.mdm_spi_header.next_data_size = next_buf_size;
+	} else {
+		header.mdm_spi_header.more = 0;
+		header.mdm_spi_header.next_data_size = 128;
+	}
+    
+	for (i = 3; i >= 0; i--)
+		header_buffer[i] = header.framesbytes[i];
+}
+
+/*
+ * Function to get header information according to IFX SPI framing protocol specification
+ */
+static int mdm_spi_get_header_info(struct mdm_spi_data *spi_data, unsigned int *valid_buf_size)
+{
+	int i;
+	union mdm_spi_frame_header header;
+    
+	for (i = 0; i < 4; i++)
+		header.framesbytes[i] = 0;
+    
+	for (i = 3; i >= 0; i--)
+		header.framesbytes[i] = spi_data->mdm_rx_buffer[i];
+    
+	if (header.mdm_spi_header.curr_data_size <= IFX_SPI_DEFAULT_BUF_SIZE) {
+		// check rx size
+		*valid_buf_size = header.mdm_spi_header.curr_data_size;
+	} else {
+		*valid_buf_size = 0;
+		printk(KERN_ERR "%s: rx data exceed buffer size\n", __func__);
+	}
+    
+	if (header.mdm_spi_header.more) {
+		// check next rx size
+		if (header.mdm_spi_header.next_data_size <= IFX_SPI_DEFAULT_BUF_SIZE)
+			return header.mdm_spi_header.next_data_size;
+	}
+	return 0;
+}
+
+
+static void mdm_spi_clear_header_info(unsigned int *hdr_ptr)
+{
+	*(hdr_ptr) = 0;
+	*(hdr_ptr + 1) = 0;
+}
+
+#ifdef MDM6600_SPI_HEADER
+static void
+mdm_spi_set_tx_frame_count(unsigned int *hdr_ptr, unsigned int id)
+{
+	*(hdr_ptr + 1) = ++(tx_count[id]);
+	if (*(hdr_ptr + 1) == 0)
+		*(hdr_ptr + 1) = ++(tx_count[id]);
+	TTYSPI_DEBUG_PRINT(KERN_ERR "Tx Count %d\n", tx_count[id]);
+}
+
+static unsigned int mdm_spi_get_rx_frame_count(unsigned int *hdr_ptr)
+{
+	return *(hdr_ptr + 1);
+}
+
+static int mdm_spi_get_remote_chk(unsigned long *hdr_ptr)
+{
+	if (*(hdr_ptr) & (0x00002000))
+		return 1;
+	return 0;
+}
+#endif
+
+/*
+ * Function to set/unset SRDY signal
+ */
+static void mdm_spi_set_srdy_signal(s16 bus_num, int value)
+{
+#if 1   //ndef USE_SRDY
+	int gpio_num = 0;
+	TTYSPI_DEBUG_PRINT("%s: bus_num=%d\n", __func__, bus_num);
+    
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+	if (0 == bus_num) {
+#endif
+        gpio_set_value(SPI1_SRDY, value);
+        gpio_num = SPI1_SRDY;
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+    } else if (1 == bus_num) {
+        gpio_set_value(SPI2_SRDY, value);
+        gpio_num = SPI2_SRDY;
+    }
+#endif
+    
+	TTYSPI_DEBUG_PRINT("%s: gpio=%d, srdy=%d\n", __func__, gpio_num, value);
+#endif
+}
+
+
+static int mdm_spi_get_mrdy_signal(s16 bus_num)
+{
+	int gpio_num = 0;
+	int value = 0;
+    
+	TTYSPI_DEBUG_PRINT("%s: bus_num=%d\n", __func__, bus_num);
+    
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+	if (0 == bus_num) {
+#endif
+        value = gpio_get_value(SPI1_MRDY);
+        gpio_num = SPI1_MRDY;
+#ifdef CONFIG_DUAL_SPI //disables spi secondary port
+    } else if (1 == bus_num) {
+        value = gpio_get_value(SPI2_MRDY);
+        gpio_num = SPI2_MRDY;
+    }
+#endif
+    
+	TTYSPI_DEBUG_PRINT("%s: gpio=%d, srdy=%d\n", __func__, gpio_num, value);
+    
+	return value;
+}
+
+
+int mdm_spi_callback(void *client_data)
+{
+	s16 *bus_num;
+    
+	bus_num = (s16 *)client_data;
+    
+	TTYSPI_DEBUG_PRINT("%s called", __func__);
+	TTYSPI_DEBUG_PRINT("%s bus_num=%d", __func__, *bus_num);
+	mdm_spi_set_srdy_signal(*bus_num, 1);
+	return 0;
+}
+
+#ifndef TX_BUFFER_QUEUE
+/*
+ * Function to calculate next_frame_size required for filling in SPI frame Header
+ */
+static int mdm_spi_get_next_frame_size(int count)
+{
+	if (count > IFX_SPI_MAX_BUF_SIZE)
+		return IFX_SPI_MAX_BUF_SIZE;
+	else
+		return count;
+}
+
+/*
+ * Function to setup transmission and reception. It implements a logic to find out the mdm_current_frame_size,
+ * valid_frame_size and sender_next_frame_size to set in SPI header frame. Copys the data to be transferred from
+ * user space to TX buffer and set MRDY signal to HIGH to indicate Master is ready to transfer data.
+ */
+static void mdm_spi_setup_transmission(struct mdm_spi_data *spi_data)
+{
+	if ((spi_data->mdm_sender_buf_size != 0) || (spi_data->mdm_receiver_buf_size != 0)) {
+		// current_frame_size must be IFX_SPI_MAX_BUF_SIZE
+		spi_data->mdm_current_frame_size = IFX_SPI_MAX_BUF_SIZE;
+        
+		if (spi_data->mdm_spi_count > 0) {
+			if (spi_data->mdm_spi_count > spi_data->mdm_current_frame_size) {
+				spi_data->mdm_valid_frame_size =
+                spi_data->mdm_current_frame_size;
+				spi_data->mdm_spi_count = spi_data->mdm_spi_count -
+                spi_data->mdm_current_frame_size;
+			} else {
+				spi_data->mdm_valid_frame_size = spi_data->mdm_spi_count;
+				spi_data->mdm_spi_count = 0;
+			}
+		} else {
+			spi_data->mdm_valid_frame_size = 0;
+			spi_data->mdm_sender_buf_size = 0;
+		}
+		spi_data->mdm_sender_buf_size = mdm_spi_get_next_frame_size(
+                                                                    spi_data->mdm_spi_count);
+        
+		/* memset buffers to 0 */
+		memset(spi_data->mdm_tx_buffer, 0, IFX_SPI_MAX_BUF_SIZE + IFX_SPI_HEADER_SIZE);
+		memset(spi_data->mdm_rx_buffer, 0, IFX_SPI_MAX_BUF_SIZE + IFX_SPI_HEADER_SIZE);
+        
+		/* Set header information */
+		mdm_spi_set_header_info(spi_data->mdm_tx_buffer, spi_data->mdm_valid_frame_size,
+                                spi_data->mdm_sender_buf_size);
+		if (spi_data->mdm_valid_frame_size > 0) {
+#ifdef MDM6600_SPI_HEADER
+			mdm_spi_set_tx_frame_count((unsigned int *)spi_data->mdm_tx_buffer,
+                                       spi_data->index);
+#endif
+            
+			memcpy(spi_data->mdm_tx_buffer + IFX_SPI_HEADER_SIZE,
+			       spi_data->mdm_spi_buf,
+			       spi_data->mdm_valid_frame_size);
+			spi_data->mdm_spi_buf = spi_data->mdm_spi_buf +
+            spi_data->mdm_valid_frame_size;
+		}
+	}
+}
+#endif
+
+#define MORE_DATA   0x00001000
+#define CURR_DATA   0x00000FFF
+#define NEXT_DATA   0x0FFF0000
+
+static int check_valid_rx_frame_header(unsigned int *hdr_ptr, int index)
+{
+	int retval = 1;
+    
+	if (*(hdr_ptr) == 0xFFFFFFFF) {
+		retval = 0;
+	} else if (*(hdr_ptr) == 0) {
+		retval = 0;
+	} else if ((*(hdr_ptr) & (~(0x0FFF3FFF))) != 0) {
+		retval = 0;
+	} else if ((*(hdr_ptr + 1) == 0)) {
+		if (*(hdr_ptr) == 0x00800000) retval = 1;
+		else if (*(hdr_ptr) == 0x00802000) retval = 1;
+		else retval = 0;
+	} else if ((*(hdr_ptr + 1) != 0)) {
+		if (((*(hdr_ptr) & MORE_DATA) != 0) &&
+		    ((*(hdr_ptr) & ((NEXT_DATA))) == 0)) retval = 0;
+		else if (((*(hdr_ptr) & MORE_DATA) == 0) &&
+                 ((*(hdr_ptr) & ((NEXT_DATA))) != 0x00800000)) retval = 0;
+		else if (*(hdr_ptr + 1) == rx_count[index]) retval = 0;
+		else retval = 1;
+	} else {
+		retval = 1;
+	}
+	TTYSPI_DEBUG_PRINT("\n check_valid_rx_frame_header *(hdr_ptr)=0x%x retval=%d \n",
+                       *(hdr_ptr), retval);
+	return retval;
+}
+
+/*
+ * Function starts Read and write operation and transfers received data to TTY core. It pulls down MRDY signal
+ * in case of single frame transfer then sets "mdm_read_write_completion" to indicate transfer complete.
+ */
+#define MAX_RETRY_COUNT 3
+#ifdef TX_BUFFER_QUEUE
+static void mdm_spi_send_and_receive_data(struct mdm_spi_data *spi_data, int tx_pending)
+{
+	unsigned int rx_valid_buf_size;
+	int status = 0;
+	int retry_count = 0;
+    
+	//WBT #196460
+	unsigned int prev_rx_frame = 0;
+	int mReTransFlag = 0;
+	int mValidRxFrame = 0;
+    
+	if (atomic_read(&spi_table[spi_data->index].in_use) == 0)
+		return;
+    
+	status = mdm_spi_sync_read_write(spi_data, IFX_SPI_FRAME_SIZE); /* 4 bytes for header */
+    
+	//resend tx buffer when spi transfer timeout happens and max_retry_count is smaller than MAX_RETRY_COUNT
+#if 0
+	while ((status == -EAGAIN)
+	       && (retry_count < MAX_RETRY_COUNT)
+	       && (tx_pending != 0)
+	       && (check_valid_rx_frame_header((unsigned int *)spi_data->mdm_rx_buffer) ==
+               0)) {
+               TTYSPI_DEBUG_PRINT(
+                                  "\n SPI Transaction Error : status = %d, retry_count=%d tx_pending=%d \n",
+                                  status, retry_count, tx_pending);
+               mdelay(10);
+               status = mdm_spi_sync_read_write(spi_data, IFX_SPI_FRAME_SIZE);
+               retry_count++;
+           }
 #else
-    
-        work->ifx_tty->ldisc->ops->receive_buf(work->ifx_tty, work->mspi_rx_buffer, NULL, work->len);
-    
+	do {
+		mReTransFlag = 0;
+        
+		mValidRxFrame = check_valid_rx_frame_header(
+                                                    (unsigned int *)spi_data->mdm_rx_buffer, spi_data->index);
+        
+		if ((status == -EAGAIN)
+		    && (tx_pending != 0)
+		    && (mValidRxFrame == 0)) { // TX Frame & spi internal error checking
+			TTYSPI_DEBUG_PRINT(
+                               "\n SPI Transaction Tx Error : status = %d, retry_count=%d tx_pending=%d \n",
+                               status, retry_count, tx_pending);
+			mReTransFlag = 1;
+			mdelay(10);
+		} else { // Rx frame checking
+			if (mValidRxFrame == 0) {
+				TTYSPI_DEBUG_PRINT(
+                                   "\n SPI Transaction Rx Error : status = %d, retry_count=%d tx_pending=%d \n",
+                                   status, retry_count, tx_pending);
+				mReTransFlag = 1;
+				mdelay(50);
+			} else {
+				mReTransFlag = 0;
+			}
+		}
+        
+		if (mReTransFlag == 1) {
+			status = mdm_spi_sync_read_write(spi_data, IFX_SPI_FRAME_SIZE);
+			retry_count++;
+		}
+	} while ((mReTransFlag == 1) && (retry_count < MAX_RETRY_COUNT));
 #endif
     
-        spin_lock_bh(&mux_rx_buff_lock);
-        mux_rx_buffer_curr_size -= ALIGN((work->len + MSPI_HEADER_SIZE),MSPI_DMA_ALIGN);
+	if (memcmp(rx_dummy, spi_data->mdm_rx_buffer, IFX_SPI_HEADER_SIZE) == 0) {
+		spi_data->mdm_receiver_buf_size = 0;
+		return;
+	}
     
-        if(MSPI_CAN_RECEIVE)
-        {
-            rts_mspi_data_flag = 0;
-            spin_unlock_bh(&mux_rx_buff_lock);
-            mutex_unlock(&mspi_rx_flush_lock);
-#ifdef WAKE_LOCK_RESUME
-            wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
+	/* Handling Received data */
+	spi_data->mdm_receiver_buf_size = mdm_spi_get_header_info(spi_data, &rx_valid_buf_size);
+    
+#ifdef MDM6600_SPI_HEADER
+	if (rx_valid_buf_size != 0) {
+		prev_rx_frame = rx_count[spi_data->index];
+		rx_count[spi_data->index] = mdm_spi_get_rx_frame_count(
+                                                               (unsigned int *)spi_data->mdm_rx_buffer);
+        
+		TTYSPI_DEBUG_PRINT("\n Rx Count : prev_rx_frame = %d, rx_count=%d \n",
+                           prev_rx_frame,
+                           rx_count[spi_data->index]);
+        
+		if (rx_count[spi_data->index] == prev_rx_frame) {
+			printk(
+                   KERN_ERR
+                   "\n SPI RX Error : duplicated : drop the frame :: prev_rx_frame = %d, rx_count=%d \n",
+                   prev_rx_frame, rx_count[spi_data->index]);
+			rx_valid_buf_size = 0;   // drop
+			rx_count[spi_data->index] = prev_rx_frame;
+		} else if (tx_count[spi_data->index] == 0) {
+			printk(
+                   KERN_ERR
+                   "\n SPI RX Error : NO Tx count rx bytes :: prev_rx_frame = %d, rx_count=%d \n",
+                   prev_rx_frame, rx_count[spi_data->index]);
+		} else if (rx_count[spi_data->index] != (prev_rx_frame + 1)) {
+			printk(KERN_ERR "\n SPI RX Error : prev_rx_frame = %d, rx_count=%d \n",
+			       prev_rx_frame,
+			       rx_count[spi_data->index]);
+		}
+	}
 #endif
-            queue_work(work->spi_data->ifx_wq, &(work->spi_data->ifx_work));
-        }
-        else
-        {
-            spin_unlock_bh(&mux_rx_buff_lock);
-            mutex_unlock(&mspi_rx_flush_lock);
-        }
-    }
-    else
-    {
-        /* flush is in progress, so drop all the data*/
-        MSPI_DBG(4, "%s flushing rx work", __func__);
-        spin_lock_bh(&mux_rx_buff_lock);
-        if(MSPI_CAN_RECEIVE)
-        {
-            /* 0 the terminal is able to receive data */
-            rts_mspi_data_flag = 0;
-        }
-        spin_unlock_bh(&mux_rx_buff_lock);
-    }
+    
+	//below statement needs to be disabled for spi echo command test, but needs to be enabled for uploading data from spi driver to ttyspi driver.
+	if ((spi_data->throttle == 0)
+	    && (rx_valid_buf_size != 0)
+	    && (spi_data->mdm_tty != NULL)
+	    && (atomic_read(&spi_table[spi_data->index].in_use) != 0)) { //do not send tty layer after process mdm_spi_close
+		tty_insert_flip_string(spi_data->mdm_tty, spi_data->mdm_rx_buffer +
+                               IFX_SPI_HEADER_SIZE,
+                               rx_valid_buf_size);
+		tty_flip_buffer_push(spi_data->mdm_tty);
+	}
+    
+#ifdef MDM6600_SPI_HEADER
+	status = mdm_spi_get_remote_chk((unsigned long *)spi_data->mdm_rx_buffer);
+	if (status != 0)
+		printk(KERN_ERR "\n SPI Remote CHK : prev_rx_frame = %d, rx_count=%d \n",
+		       prev_rx_frame,
+		       rx_count[spi_data->index]);
+    
+#endif
+}
+#else // TX_BUFFER_QUEUE
+static void mdm_spi_send_and_receive_data(struct mdm_spi_data *spi_data)
+{
+	unsigned int rx_valid_buf_size;
+	int status = 0;
+    
+	TTYSPI_DEBUG_PRINT("%s: start\n", __func__);
+    
+	//status = mdm_spi_sync_read_write(spi_data, spi_data->mdm_current_frame_size+IFX_SPI_HEADER_SIZE); /* 4 bytes for header */
+	status = mdm_spi_sync_read_write(spi_data, IFX_SPI_MAX_BUF_SIZE + IFX_SPI_HEADER_SIZE); /* 4 bytes for header */
+	if (status > 0) {
+		memset(spi_data->mdm_tx_buffer, 0, IFX_SPI_MAX_BUF_SIZE + IFX_SPI_HEADER_SIZE);
+		spi_data->mdm_ret_count = spi_data->mdm_ret_count +
+        spi_data->mdm_valid_frame_size;
+	}
+	TTYSPI_DEBUG_PRINT("%s: mdm_ret_count = %d\n", __func__, spi_data->mdm_ret_count);
+    
+	if (memcmp(rx_dummy, spi_data->mdm_rx_buffer, IFX_SPI_HEADER_SIZE) == 0) {
+		spi_data->mdm_receiver_buf_size = 0;
+		return;
+	}
+    
+	/* Handling Received data */
+	spi_data->mdm_receiver_buf_size = mdm_spi_get_header_info(spi_data, &rx_valid_buf_size);
+	TTYSPI_DEBUG_PRINT("%s: mdm_receiver_buf_size = %d, rx_valid_buf_size = %d\n", __func__,
+                       spi_data->mdm_receiver_buf_size,
+                       rx_valid_buf_size);
+    
+	//if(!rx_valid_buf_size)
+	//{
+	//rx_valid_buf_size = 6;
+	//}
+    
+	//below statement needs to be disabled for spi echo command test, but needs to be enabled for uploading data from spi driver to ttyspi driver.
+	if ((spi_data->throttle == 0) && (rx_valid_buf_size != 0) &&
+	    (spi_data->mdm_tty != NULL) &&
+	    (atomic_read(&spi_table[spi_data->index].in_use) != 0)) {
+		tty_insert_flip_string(spi_data->mdm_tty, spi_data->mdm_rx_buffer +
+                               IFX_SPI_HEADER_SIZE,
+                               rx_valid_buf_size);
+		tty_flip_buffer_push(spi_data->mdm_tty);
+	}
+	/*else
+	 * {
+	 * handle RTS and CTS in SPI flow control
+	 * Reject the packet as of now
+	 * }*/
+    
+	TTYSPI_DEBUG_PRINT("%s: end\n", __func__);
+}
+#endif // TX_BUFFER_QUEUE
 
-    kfree(work);
+
+/*
+ * Function copies the TX_BUFFER and RX_BUFFER pointer to a spi_transfer
+ * structure and add it to SPI tasks.
+ * And calls SPI Driver function "spi_sync" to start data transmission and
+ * reception to from MODEM
+ */
+
+#define MAX_TRANSFER_FAILED 5
+static int count_transfer_failed = 0;
+
+//check communication with modem
+int is_modem_communicating(void)
+{
+	int ret = 1;
+    
+	if (count_transfer_failed >= MAX_TRANSFER_FAILED)
+		ret = 0;
+    
+	return ret;
 }
 
-static void
-ifx_spi_tty_callback( struct ifx_spi_data *spi_data)
+
+//#define SPI_TIMEDOUT_NSEC     20000000     //20ms
+#define SPI_TIMEDOUT_SEC      2     //2s
+
+static unsigned int mdm_spi_sync_read_write(struct mdm_spi_data *spi_data, unsigned int len)
 {
-
-    struct mspi_rx_work *work;
-    unsigned int rx_valid_buf_size;
-    unsigned int rx_next_idx;
-    if(spi_data != NULL)
-    {
-    /* Handling Received data */
-        ifx_spi_header_get_info(spi_data->ifx_rx_buffer, &rx_valid_buf_size, &spi_data->ifx_receiver_buf_size);
-        spi_data->ifx_receiver_more_data = ifx_spi_header_get_more_flag(spi_data->ifx_rx_buffer);
-        cts_mspi_data_flag = ifx_spi_header_get_cts_flag(spi_data->ifx_rx_buffer);
-
-        if(MSPI_ISDBG(8))
-        {
-            UNMSPI_DBG("TS istc: RXbuf=%p \n",spi_data->ifx_rx_buffer);
-            mspi_dump_spi_header_info(spi_data->ifx_rx_buffer, 1);
-        }
-
-        if((spi_data->users > 0) && (rx_valid_buf_size > 0)
-          && !(rx_valid_buf_size > MSPI_MAX_DATALOAD)) // validity check
-        {
-            work = (struct mspi_rx_work*)kmalloc(sizeof(struct mspi_rx_work),GFP_ATOMIC);
-            if (work)
-            {
-                work->ifx_tty = spi_data->ifx_tty; //yes, I know it can be changed, but we have only 1 mSPI client.
-                work->len = rx_valid_buf_size;
-                work->spi_data = spi_data;
-                work->mspi_rx_buffer = spi_data->ifx_rx_buffer + MSPI_HEADER_SIZE;
-                rx_next_idx = ALIGN((rx_valid_buf_size + MSPI_HEADER_SIZE),MSPI_DMA_ALIGN);
-                if((spi_data->ifx_rx_buffer + (int)rx_next_idx +  (int)MSPI_MAX_BUFF_SIZE) > mspi_rx_buffer_end)
-                {
-                    spi_data->ifx_rx_buffer = mspi_rx_buffer_start;
-                }
-                else
-                {
-                    spi_data->ifx_rx_buffer += rx_next_idx;
-                }
-                MSPI_DBG(7,"TS istc: a=%p l=%d na=%p \n",work->mspi_rx_buffer,work->len,spi_data->ifx_rx_buffer);
-                spin_lock_bh(&mux_rx_buff_lock);
-                mux_rx_buffer_curr_size += rx_next_idx;
-                if(MSPI_CANNOT_RECEIVE)
-                    rts_mspi_data_flag = 1;
-
-                spin_unlock_bh(&mux_rx_buff_lock);
-                INIT_WORK(&(work->work), mspi_rx_task);
-                queue_work(mspi_rx_wq, &(work->work));
-            }
-        }
-
-        MSPI_DBG(5,"TS istc: CTS=%d RTS=%d \n",cts_mspi_data_flag,rts_mspi_data_flag);
-    }
-}
-
-static void
-ifx_spi_sync_data(struct ifx_spi_data *spi_data)
-{
-    int status              = -ESHUTDOWN;
-
-    struct spi_message  m;
-    struct spi_transfer t   = {
-                        .tx_buf     = spi_data->ifx_tx_buffer,
-                        .rx_buf     = spi_data->ifx_rx_buffer,
-                        .len        = mspi_curr_dma_data_len,
-                        };
-
-    if(ifx_shutdown != 0 || spi_data->spi == NULL) return;
-
-    if(is_tx_rx_required == 0) t.tx_buf = NULL;
-
-    spi_message_init(&m);
-    spi_message_add_tail(&t, &m);
-    status = spi_sync(spi_data->spi, &m);
-    if (status == 0){
-        status = m.status;
-        if (status == 0)
-            status = m.actual_length;
-    }
-
-
-    if(status < 0)
-    {
-        MSPI_ERR("spi error encountered, halting");
-        ifx_shutdown = 1;
-    }
-
-    if(status != mspi_curr_dma_data_len)
-    {
-        MSPI_ERR("[EBS-SPI] TX-RX SPI Failure !! dma_len=%d ret_len=%d\n",mspi_curr_dma_data_len, status);
-        return;
-    }
-    ifx_spi_tty_callback(spi_data);
-}
-
-static void ifx_spi_ap_ready(struct spi_device *spi)
-{
-    struct ifx_spi_data *spi_data = spi_data_table[MSPI_DEFAULT_TABLE_ENTRY];
-
-    if(spi_data == NULL)
-    {
-        printk("ifx_spi_ap_ready, spi_data is null\n");
-        return;
-    }
-    gpio_set_value(spi_data->srdy_gpio, 1);
-	gpio_set_value(spi_data->srdy_gpio, 0);
+	int status;
+	struct spi_message m;
+	struct spi_transfer t = {
+		.tx_buf = spi_data->mdm_tx_buffer,
+		.rx_buf = spi_data->mdm_rx_buffer,
+		.len	= len,
+	};
+    
+#if 0
+	int i;
+#endif
+    
+	TTYSPI_DEBUG_PRINT(KERN_INFO "%s: start\n", __func__);
+    
+	spi_message_init(&m);
+	spi_message_add_tail(&t, &m);
+    
+	/* condition added for checking the 'in_use' variable in order
+	 * to prevent spi transmitting after 'mdm_spi_close' */
+	if ((NULL == spi_data) || (NULL == spi_data->spi) ||
+	    (atomic_read(&spi_table[spi_data->index].in_use) == 0)) {
+		//WBT #196461
+		//status = -ESHUTDOWN;
+		return -ESHUTDOWN;
+	} else {
+		//hrtimer_start(&(spi_data->timer), ktime_set(0, SPI_TIMEDOUT_NSEC), HRTIMER_MODE_REL);
+		hrtimer_start(&(spi_data->timer), ktime_set(SPI_TIMEDOUT_SEC,
+                                                    0), HRTIMER_MODE_REL);
+        
+		/* check if 'spi_sync' is running(when running, is_syncing is 1,
+		 *  when finished, is_syncing is 0) */
+		atomic_set(&spi_data->is_syncing, 1);
+		status = spi_sync(spi_data->spi, &m);
+		atomic_set(&spi_data->is_syncing, 0);
+        
+		do {
+			//when the timer is currently active apply 1 ms of sleep
+			if (hrtimer_try_to_cancel(&(spi_data->timer)) == -1)
+				msleep(1);
+			else break;
+		} while (1);
+	}
+    
+	mdm_spi_set_srdy_signal(spi_data->spi->master->bus_num, 0);
+    
+	TTYSPI_DEBUG_PRINT("%s: status = %d\n", __func__, status);
+    
+	if (status == 0) {
+		status = m.status;
+		if (status == 0)
+			status = m.actual_length;
+        
+		//reset 'count_transfer_failed' to zero, if spi transter succeeds at least one out of five times
+		count_transfer_failed = 0;
+	} else {
+		if (0 == is_modem_communicating())
+			printk(
+                   KERN_ERR
+                   "%s: transmission UNsuccessful, status:%d, count_Transfer_Failed:%d\n",
+                   __func__, status, count_transfer_failed);
+        
+		//increase 'count_transfer_failed', when spi transter fails
+		count_transfer_failed++;
+	}
+    
+#if 0
+	//for debug perpose only print ttyspi layer tx/rx buffer value
+	if (1 == spi_data->is_suspended) {
+		printk("[spi tx] ");
+		for (i = 0; i < 24; i++)
+			printk("%02x ", spi_data->mdm_tx_buffer[i]);
+		printk("\n");
+        
+		printk("[spi rx] ");
+		for (i = 0; i < 24; i++)
+			printk("%02x ", spi_data->mdm_rx_buffer[i]);
+		printk(", status 0x%x \n", status);
+	}
+#endif
+    
+	return status;
 }
 
 /*
@@ -1615,213 +1632,362 @@ static void ifx_spi_ap_ready(struct spi_device *spi)
  * reception if it is a Master initiated data transfer. For both the cases Master intiated/Slave intiated
  * transfer it starts data transfer.
  */
-static irqreturn_t ifx_spi_handle_mrdy_irq(int irq, void *handle)
+static irqreturn_t mdm_spi_handle_mrdy_irq(int irq, void *handle)
 {
-    struct ifx_spi_data *spi_data = (struct ifx_spi_data *)handle;
-
-    MSPI_DBG(5, "IRQ");
-    if (ifx_shutdown == 1) return IRQ_HANDLED;
-    if (mspi_issuspend) {
-        MSPI_DBG(5, "[SUSPEND] Interrupt while in suspend state, postponing");
-        mspi_irq_pending = true;
-
-        /* Acquire a wakelock to cancel suspend mode */
-#ifdef WAKE_LOCK_RESUME
-        wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
+	struct mdm_spi_data *spi_data = (struct mdm_spi_data *)handle;
+	int value;
+    
+	value = mdm_spi_get_mrdy_signal(spi_data->index);
+    
+	if (value == 0) {
+		TTYSPI_DEBUG_PRINT(KERN_ERR "%s in the mrdy irq value(=%d) --> ignore \n",
+                           __func__,
+                           value);
+		return IRQ_HANDLED;
+	}
+    
+#ifdef CONFIG_HAS_WAKELOCK
+	wake_lock_timeout(&spi_data->spi_wakelock, SPI_WAKELOCK_TIMEOUT * HZ);
 #endif
-        return IRQ_HANDLED;
-    }
-
-    if(spi_data != NULL && spi_data->ifx_tty != NULL)
-    {
-#ifdef WAKE_LOCK_RESUME
-        wake_lock_timeout(&spi_data_table[MSPI_DEFAULT_TABLE_ENTRY]->wake_lock, MSPI_WAKE_LOCK_TIMEOUT);
+    
+#ifdef TX_BUFFER_QUEUE
+	if (atomic_read(&next_transfer_flag) == 0)
+#else
+        if (!spi_data->mdm_master_initiated_transfer)
 #endif
-        queue_work(spi_data->ifx_wq, &spi_data->ifx_work);
-    }
-    else
-    {
-        MSPI_ERR("Unexpected interrupt happen!");
-    }
-    return IRQ_HANDLED;
-}
-
-#ifdef SPI2SPI_TEST
-static void
-ifx_spi2spi_handle_work(struct work_struct *work)
-{
-    int status = 0;
-    struct ifx_spi_data *spi_data = container_of(work, struct ifx_spi_data, ifx_work);
-
-    if(spi_data != NULL && spi_data->spi != NULL)
-    {
-        struct spi_message  m;
-        struct spi_transfer t = {
-            .tx_buf     = spi2spi_tx_buff,
-            .rx_buf     = spi2spi_rx_buff,
-            .len        = spi2spi_buff_size,
-        };
-        while(1)
         {
-            spi_message_init(&m);
-            spi_message_add_tail(&t, &m);
-            status = spi_sync(spi_data->spi, &m);
-            if (status == 0){
-                status = m.status;
-                if (status == 0)
-                {
-                    spin_lock_bh(&spi2spi_lock);
-                    spi2spi_counter += m.actual_length;
-                    spin_unlock_bh(&spi2spi_lock);
-                }
+            //prevent spi transmission being registered as workqueue event
+            if (atomic_read(&spi_table[spi_data->index].in_use) == 1) {
+                queue_work(spi_data->mdm_wq, &spi_data->mdm_work);
+                TTYSPI_DEBUG_PRINT("%s: queue_work executed!!!\n", __func__);
             }
         }
-    }
-}
-#endif //SPI2SPI_TEST
-
-static void
-ifx_spi_handle_free_irq_work(struct work_struct *work)
-{
-    struct ifx_spi_data *spi_data = container_of(work, struct ifx_spi_data, ifx_free_irq_work);
-
-    if(spi_data != NULL && spi_data->spi != NULL)
-    {
-        struct irq_desc *desc = irq_to_desc(spi_data->spi->irq);
-
-        if(spi_data->spi->irq && (desc!=NULL && desc->action))
-        {
-            free_irq(spi_data->spi->irq, spi_data);
-            MSPI_DBG(6,"ifx_spi_handle_free_irq_work: free_irq\n");
-        }
-        else
-        {
-            MSPI_ERR("ifx_spi_handle_free_irq_work: irq state has changed!\n");
-        }
-    }
-    else
-    {
-        MSPI_ERR("ifx_spi_handle_free_irq_work: spi_data or spi is NULL!\n");
-    }
-
-}
-
-static void
-ifx_spi_handle_work(struct work_struct *work)
-{
-    struct ifx_spi_data *spi_data = container_of(work, struct ifx_spi_data, ifx_work);
-
-  do
-  {
-
-    if(spi_data == NULL || ifx_shutdown != 0 || mspi_issuspend) return;
-
-    mutex_lock(&mspi_transfer_lock);
     
-    memset(spi_data->ifx_rx_buffer,0,MSPI_HEADER_SIZE);
-
-    if(MSPI_ISDBG(7))
-    {
-        mspi_frame_tx_count++;
-        UNMSPI_DBG("TS ishw: cTX=%d cRX=%d cDMA=%d id=%d\n", mspi_data_tx_next_len, mspi_data_rx_next_len,mspi_curr_dma_data_len,mspi_frame_tx_count);
-    }
-
-    is_tx_rx_required = 0;
-
-    if(mspi_queue_empty() == 0)
-    {
-        mspi_queue_data_setup_spi_tx_buf(spi_data);
-        is_tx_rx_required = 1;
-        if(MSPI_ISDBG(8))
-        {
-            UNMSPI_DBG("TS TX_RX tbuf=%p rbuf=%p\n",spi_data->ifx_tx_buffer,spi_data->ifx_rx_buffer);
-  //            dump_spi_simple(spi_data->ifx_tx_buffer);
-            mspi_dump_spi_header_info(spi_data->ifx_tx_buffer, 0);
-        }
-    }
-    else
-    {
-    /* we have nothing to send from our side */
-        spin_lock_bh(&mux_rx_buff_lock);
-        if(MSPI_CAN_RECEIVE)
-        {
-            rts_mspi_data_flag = 0;
-        }
-
-      /* we have data for the next transfer, and need to tell about this to CP
-         or rts flag is not 0, and we must pass at least the header to the CP otherwise it receices 0 */
-        if(mspi_data_tx_next_len != 0 || rts_mspi_data_flag != 0)
-        {
-            is_tx_rx_required = 1;
-        }
-        spin_unlock_bh(&mux_rx_buff_lock);
-        if(spi_data->ifx_tx_buffer != mspi_tx_buffer_backup)
-        {
-            spi_data->ifx_tx_buffer = mspi_tx_buffer_backup;
-        }
-        ifx_spi_header_set_info(spi_data->ifx_tx_buffer, 0, 0);
-        if(MSPI_ISDBG(8))
-        {
-            UNMSPI_DBG("TS RX_TX tbuf=%p rbuf=%p\n",spi_data->ifx_tx_buffer,spi_data->ifx_rx_buffer);
-  //            dump_spi_simple(spi_data->ifx_tx_buffer);
-            mspi_dump_spi_header_info(spi_data->ifx_tx_buffer, 0);
-        }
-    }
-
-    ifx_spi_sync_data(spi_data);
-
-    spin_lock_bh(&spi_nodes_lock);
-    /* Some valuable data was sent */
-    if((spi_data->ifx_tx_buffer != mspi_tx_buffer_backup) && (spi_data->ifx_tx_buffer != NULL))
-    {
-         mspi_tx_buffer_pos += (mspi_curr_dma_data_len - MSPI_HEADER_SIZE);
-
-         if(mspi_tx_buffer_pos >= (mspi_tx_buffer_end - MSPI_HEADER_SIZE))
-             mspi_tx_buffer_pos = mspi_tx_buffer_start;
-    }
-
-/* In the just transfered frame CP indicated that it would like to send some data next time */
-    if(spi_data->ifx_receiver_buf_size > 0)
-    {
-        mspi_data_rx_next_len = ALIGN((spi_data->ifx_receiver_buf_size + MSPI_HEADER_SIZE),MSPI_DMA_ALIGN);
-        spin_lock_bh(&mux_rx_buff_lock);
-        switch(rts_mspi_data_flag)
-        {
-            case 1:
-                rts_mspi_data_flag = 2;
-            case 0:
-            /* terminal is able to receive data */
-                break;
-                
-            case 2:
-            default:
-                mspi_data_rx_next_len = 0;
-                break;
-        }
-        spin_unlock_bh(&mux_rx_buff_lock);
-    }
-    else
-    {
-        mspi_data_rx_next_len = 0;
-    }
-
-    if(cts_mspi_data_flag != 0)
-    {
-        mspi_data_tx_next_len = 0;
-    }
-
-    mspi_curr_dma_data_len = max(mspi_data_tx_next_len, mspi_data_rx_next_len);
-
-    if(mspi_curr_dma_data_len == 0)
-         mspi_curr_dma_data_len = MSPI_DEF_BUFF_SIZE;
-
-    spin_unlock_bh(&spi_nodes_lock);
-    mutex_unlock(&mspi_transfer_lock);
-
-    MSPI_DBG(7,"TS ishw: nTX=%d nRXrecv=%d nRX=%d nDMA=%d \n", mspi_data_tx_next_len, spi_data->ifx_receiver_buf_size, mspi_data_rx_next_len,mspi_curr_dma_data_len);
-  }while((mspi_queue_empty() == 0) || (spi_data->ifx_receiver_more_data == 1));
+	return IRQ_HANDLED;
 }
 
+#ifdef TX_BUFFER_QUEUE
+int get_tx_pending_data(struct mdm_spi_data *spi_data, int *anymore)
+{
+	int cumu_data_size = 0;
+	int data_size = 0;
+	u8 *data_ptr;
+	int tx_data_found = 0;
+	int remain_count = 0;
+	int queue_count = 0;
+	int initial_queue_count = 0;
+	int cumu_queue_count = 0;
+    
+	struct spi_data_send_struct *prev_ptr;
+	struct spi_data_send_struct **ppMS;
+	struct spi_data_send_struct *curr_ptr = spi_data_send_pending;
+    
+	TTYSPI_DEBUG_PRINT("get_tx_pending_data()++ spi_data_send_pending 0x%x\n",
+                       (uint)curr_ptr);
+    
+	spin_lock_irqsave(&spi_nodes_lock, spi_lock_flag);
+    
+	if (spi_data_send_pending == NULL) {
+		spin_unlock_irqrestore(&spi_nodes_lock, spi_lock_flag);
+		return 0;
+	}
+    
+	initial_queue_count = spi_data_send_pending->count;
+    
+	do {
+		prev_ptr = NULL;
+        
+		//fixed the queue boundary check routine for when ONLY ONE queue remains
+		for (ppMS = &spi_data_send_pending, queue_count = 0;
+		     (((*ppMS)->next != NULL) && (queue_count <= spi_data_send_pending->count));
+		     ppMS = &((*ppMS)->next), queue_count++) ;
+        
+		if (*ppMS == NULL) {
+			printk(KERN_ERR "Never Hit this case\n");
+			return 0;
+		} else if (((*ppMS)->next != NULL)) {
+			printk(KERN_ERR "Never Hit this case *ppMS->next 0x%x\n",
+			       (uint)(*ppMS)->next);
+			return 0;
+		} else {
+			// Good Queue
+		}
+        
+		if (((*ppMS)->size + cumu_data_size) <= IFX_SPI_MAX_BUF_SIZE) {
+			memcpy(&(spi_data->mdm_tx_buffer[IFX_SPI_HEADER_SIZE + cumu_data_size]),
+			       (*ppMS)->data, (*ppMS)->size);
+            
+			if ((*ppMS)->bkp_data != NULL) {
+				data_ptr = (*ppMS)->bkp_data;
+				data_size = (*ppMS)->bkp_size;
+				(*ppMS)->bkp_data = NULL;
+				(*ppMS)->bkp_size = 0;
+			} else {
+				data_ptr = (*ppMS)->data;
+				data_size = (*ppMS)->size;
+			}
+            
+			cumu_data_size = cumu_data_size + (*ppMS)->size;
+            
+			(*ppMS)->size = 0;
+			(*ppMS)->data = NULL;
+            
+			prev_ptr = (*ppMS)->prev;
+			(*ppMS)->next = NULL;
+			(*ppMS)->prev = NULL;
+            
+			spi_data_send_pending->count--;
+			tx_data_found = 1;
+			kfree(data_ptr);
+			kfree((*ppMS));
+            
+			if (prev_ptr == NULL) {
+				spi_data_send_pending = NULL;
+				break;
+			} else {
+				prev_ptr->next = NULL;
+			}
+		} else {
+			remain_count = ((*ppMS)->size + cumu_data_size) - IFX_SPI_MAX_BUF_SIZE;
+			memcpy(&(spi_data->mdm_tx_buffer[IFX_SPI_HEADER_SIZE + cumu_data_size]),
+			       (*ppMS)->data, ((*ppMS)->size - remain_count));
+			cumu_data_size += ((*ppMS)->size - remain_count);
+            
+			(*ppMS)->bkp_data = (*ppMS)->data;
+			(*ppMS)->bkp_size = (*ppMS)->size;
+			(*ppMS)->data = (*ppMS)->data + ((*ppMS)->size - remain_count);
+			(*ppMS)->size = remain_count;
+            
+			*anymore = 1;
+			break;
+		}
+        
+		if (prev_ptr == NULL) {
+			printk(KERN_ERR "Never Hit this case prev_ptr=0x%x\n", (uint)prev_ptr);
+			break;
+		}
+		cumu_queue_count++;
+	} while ((cumu_data_size <= IFX_SPI_MAX_BUF_SIZE) &&
+             (cumu_queue_count < initial_queue_count));
+    
+	curr_ptr = spi_data_send_pending;
+	spin_unlock_irqrestore(&spi_nodes_lock, spi_lock_flag);
+    
+	TTYSPI_DEBUG_PRINT(
+                       "get_tx_pending_data()-- curr_ptr=0x%x cumu_data_size=%d anymore=%d\n",
+                       (uint)curr_ptr,
+                       cumu_data_size, *anymore);
+    
+	return cumu_data_size;
+}
+#endif
+
+
+#ifdef TX_BUFFER_QUEUE
+static void mdm_spi_handle_work(struct work_struct *work)
+{
+	struct mdm_spi_data *spi_data;
+	int tx_pending = 0;
+	int tx_anymore = 0;
+    
+	int pm_off_count;
+    
+	//unsigned int tx_starttime;
+	//unsigned int tx_endtime;
+    
+	TTYSPI_DEBUG_PRINT("%s()++ %d\n", __func__, atomic_read(&next_transfer_flag));
+	atomic_set(&next_transfer_flag, 0);
+	do {
+		spi_data = container_of(work, struct mdm_spi_data, mdm_work);
+        
+		if (spi_data == NULL) {
+			printk(KERN_ERR "%s error spi_data(0x%x) is NULL \n", __func__,
+			       (int)spi_data);
+			break;
+		}
+        
+		if (atomic_read(&spi_table[spi_data->index].in_use) == 0) {
+			printk(KERN_ERR "%s: open ttyspi first(#%d)\n", __func__,
+			       spi_data->index);
+			return;
+		}
+        
+		//replace to the header cleaning.
+		//memset(spi_data->mdm_tx_buffer, 0, IFX_SPI_FRAME_SIZE);
+		//memset(spi_data->mdm_rx_buffer, 0, IFX_SPI_FRAME_SIZE);
+        
+		tx_anymore = 0;
+		tx_pending = get_tx_pending_data(spi_data, &tx_anymore);
+        
+		pm_off_count = 0;
+        
+		//need to wait transferring tx/rx data because ap is in a suspended state
+		if (1 == spi_data->is_suspended) {
+			pm_off_count = 1;
+			TTYSPI_DEBUG_PRINT("mdm_spi_handle_work INFO is_suspended is (0x%x)\n",
+                               (int)spi_data->is_suspended);
+            
+			//wait for ap to return to resume state with a worst case scenario of 5sec
+			do {
+				mdelay(5);
+				pm_off_count++;
+			} while ((1 == spi_data->is_suspended) && (pm_off_count < (5 * 200)));
+            
+			TTYSPI_DEBUG_PRINT(
+                               "mdm_spi_handle_work INFO EXIT is_suspend = 0x%x pm_off_count=%d\n",
+                               (int)spi_data->is_suspended, pm_off_count);
+			if (1 == spi_data->is_suspended)
+				// To Do how to handle the PM OFF state during 1sec
+				TTYSPI_DEBUG_PRINT(
+                                   "mdm_spi_handle_work error is_suspended is (0x%x)\n",
+                                   (int)spi_data->is_suspended);
+		}
+        
+#if 0           // Sometimes, the AP response time takes a long time, so a AT command pending happens. --> allow the null traffic because the CP seem to be ready to send.
+		if ((tx_pending == 0)
+		    && (atomic_read(&next_transfer_flag) == 0)
+#ifdef SPI_STATISTICS_CHECK
+		    && (dummy_data_flag == 0)
+#endif
+		    && (spi_data->mdm_receiver_buf_size == 0)
+		    && (mdm_spi_get_mrdy_signal(spi_data->index) == 0)
+		    && (pm_off_count == 0)) {
+			TTYSPI_DEBUG_PRINT(
+                               "NULL Transfer will be triggered...(%d %d) %d %d %d %d %d\n",
+                               tx_count[0], rx_count[0], tx_pending,
+                               atomic_read(
+                                           &next_transfer_flag), spi_data->mdm_receiver_buf_size,
+                               mdm_spi_get_mrdy_signal(
+                                                       spi_data->index), pm_off_count);
+			break; // just return;
+		}
+#endif
+        
+		spi_data->mdm_receiver_buf_size = 0; // next rx frame size
+        
+		//0. Frame Setup
+		mdm_spi_clear_header_info((unsigned int *)spi_data->mdm_tx_buffer);
+        
+		if (tx_anymore) mdm_spi_set_header_info(spi_data->mdm_tx_buffer, tx_pending,
+                                                IFX_SPI_MAX_BUF_SIZE);
+		else mdm_spi_set_header_info(spi_data->mdm_tx_buffer, tx_pending, 0);
+        
+		if (tx_pending != 0) mdm_spi_set_tx_frame_count(
+                                                        (unsigned int *)spi_data->mdm_tx_buffer, spi_data->index);
+        
+		mdm_spi_clear_header_info((unsigned int *)spi_data->mdm_rx_buffer);
+        
+		// 1. SPI Transmit
+		//tx_starttime= NvOsGetTimeMS();
+		mdm_spi_send_and_receive_data(spi_data, tx_pending);
+		//tx_endtime = NvOsGetTimeMS();
+        
+#if 0
+		if ((tx_endtime - tx_starttime) > 1500) {
+			printk(
+                   KERN_ERR
+                   "\n SPI TX Error : tx_endtime = %d, tx_starttime=%d (diff=%d) \n",
+                   tx_endtime, tx_starttime, (tx_endtime - tx_starttime));
+			//if(timeout_count++>5) print_spi_log(3);
+			timeout_count++;
+		} else {
+			timeout_count = 0;
+		}
+#endif
+        
+		if (tx_anymore || spi_data->mdm_receiver_buf_size) {
+			TTYSPI_DEBUG_PRINT("mdm_spi_handle_work :: %d  %d \n", tx_anymore,
+                               spi_data->mdm_receiver_buf_size);
+			atomic_set(&next_transfer_flag, 1);
+		} else {
+			atomic_set(&next_transfer_flag, 0);
+		}
+        
+		if (spi_data->is_waiting == true) {
+			complete(&spi_data->mdm_read_write_completion);
+			spi_data->is_waiting = false;
+		}
+	} while (atomic_read(&next_transfer_flag) != 0);
+    
+	TTYSPI_DEBUG_PRINT("%s()-- %d\n", __func__, atomic_read(&next_transfer_flag));
+	atomic_set(&next_transfer_flag, 0);
+#ifdef SPI_STATISTICS_CHECK
+	dummy_data_flag = 0;
+#endif
+}
+#else
+static void mdm_spi_handle_work(struct work_struct *work)
+{
+	struct mdm_spi_data *spi_data = container_of(work, struct mdm_spi_data, mdm_work);
+	s16 bus_num = spi_data->spi->master->bus_num;
+    
+	TTYSPI_DEBUG_PRINT("%s: start\n", __func__);
+	TTYSPI_DEBUG_PRINT("%s: bus_num=%d\n", __func__, bus_num);
+    
+	if (atomic_read(&spi_table[spi_data->index].in_use) == 0) {
+		printk(KERN_ERR "open ttyspi first(#%d)\n", spi_data->index);
+		return;
+	}
+    
+	/* read condition */
+	if (!spi_data->mdm_master_initiated_transfer) {
+		TTYSPI_DEBUG_PRINT("[spi_mdm6600 #%d]mdm_spi_handle_work came from mdm6600\n",
+                           spi_data->index);
+		mdm_spi_setup_transmission(spi_data);
+		//mdm_spi_set_srdy_signal(bus_num, 1);
+		mdm_spi_send_and_receive_data(spi_data);
+		/* Once data transmission is completed, the MRDY signal is lowered */
+		if ((spi_data->mdm_sender_buf_size == 0) &&
+		    (spi_data->mdm_receiver_buf_size == 0)) {
+			//mdm_spi_set_srdy_signal(bus_num, 0);
+            
+			//  Sometimes spi_tx_buf is set to NULL
+			spi_data->mdm_sender_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
+			spi_data->mdm_receiver_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
+		}
+        
+		/* We are processing the slave initiated transfer in the mean time Mux has requested master initiated data transfer */
+		/* Once Slave initiated transfer is complete then start Master initiated transfer */
+		if (spi_data->mdm_master_initiated_transfer == 1) {
+			/* It is a condition where Slave has initiated data transfer and both SRDY and MRDY are high and at the end of data transfer
+			 * MUX has some data to transfer. MUX initiates Master initiated transfer rising MRDY high, which will not be detected at Slave-MODEM.
+			 * So it was required to rise MRDY high again */
+			//mdm_spi_set_srdy_signal(bus_num, 1);
+		}
+	}
+	/* write condition */
+	else {
+		TTYSPI_DEBUG_PRINT("[spi_mdm6600 #%d]mdm_spi_handle_work came from t20\n",
+                           spi_data->index);
+		mdm_spi_setup_transmission(spi_data);
+		mdm_spi_send_and_receive_data(spi_data);
+		/* Once data transmission is completed, the MRDY signal is lowered */
+		if (spi_data->mdm_sender_buf_size == 0) {
+			if (spi_data->mdm_receiver_buf_size == 0) {
+				//mdm_spi_set_srdy_signal(bus_num, 0);
+#if 1
+				spi_data->mdm_sender_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
+				spi_data->mdm_receiver_buf_size = IFX_SPI_DEFAULT_BUF_SIZE;
+#else
+				mdm_spi_buffer_initialization(spi_data);
+#endif
+			}
+			spi_data->mdm_master_initiated_transfer = 0;
+            
+			//  fix RIL holding problem - in case of  spi_data->mdm_sender_buf_size > 0, must send complete also.
+			//complete(&spi_data->mdm_read_write_completion);
+		}
+		//spi_data->mdm_master_initiated_transfer = 0;
+		complete(&spi_data->mdm_read_write_completion);
+		// fix RIL holding problem - in case of  spi_data->mdm_sender_buf_size > 0, must send complete also.
+	}
+}
+#endif
+
+/* ######################################################################## */
+
+
+/* ######################################################################## */
 
 /* Initialization Functions */
 
@@ -1831,112 +1997,84 @@ ifx_spi_handle_work(struct work_struct *work)
  * on SRDY GPIO pin for SRDY signal going HIGH. In case of failure of SPI driver register cases it unregister tty driver
  * from tty core.
  */
-int
-__init ifx_spi_init(void)
+static int __init mdm_spi_init(void)
 {
-    int status = 0;
-    MSPI_ERR("mSPI driver(%s). Version: %s\n" ,mspi_drv_driver_name ,mspi_drv_driver_version);
-
-    /* Allocate and Register a TTY device */
-    ifx_spi_tty_driver = alloc_tty_driver(IFX_N_SPI_MINORS);
-    if (!ifx_spi_tty_driver){
-        MSPI_ERR("Fail to allocate TTY Driver\n");
-        return -ENOMEM;
-    }
-
-    /* initialize the tty driver */
-    ifx_spi_tty_driver->owner = THIS_MODULE;
-    ifx_spi_tty_driver->driver_name = (const char *)(&mspi_drv_driver_name);
-    ifx_spi_tty_driver->name = "ttyspi";
-    ifx_spi_tty_driver->major = IFX_SPI_MAJOR;
-    ifx_spi_tty_driver->minor_start = 0;
-    ifx_spi_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
-    ifx_spi_tty_driver->subtype = SERIAL_TYPE_NORMAL;
-    ifx_spi_tty_driver->flags = TTY_DRIVER_REAL_RAW;
-    ifx_spi_tty_driver->init_termios = tty_std_termios;
-    ifx_spi_tty_driver->init_termios.c_cflag = B115200 | CS8 | CREAD | HUPCL | CLOCAL;
-    tty_set_operations(ifx_spi_tty_driver, &ifx_spi_ops);
-
-    status = tty_register_driver(ifx_spi_tty_driver);
-    if (status != 0){
-        MSPI_ERR("Failed to register mSPI tty driver");
-        put_tty_driver(ifx_spi_tty_driver);
-        return status;
-    }
-
-#ifdef MSPI_DRV_DEBUG_FS_LEVEL
-    create_mspi_proc_dbg_file();
+	int status = 0;
+    
+	TTYSPI_DEBUG_PRINT("%s: start\n", __func__);
+	memset(spi_table, 0x0, sizeof(struct allocation_table) * 4);
+    
+	/* Allocate and Register a TTY device */
+	mdm_spi_tty_driver = alloc_tty_driver(IFX_N_SPI_MINORS);
+	if (!mdm_spi_tty_driver) {
+		printk(KERN_ERR "Fail to allocate TTY Driver\n");
+		return -ENOMEM;
+	}
+    
+	/* initialize the tty driver */
+	mdm_spi_tty_driver->owner = THIS_MODULE;
+	mdm_spi_tty_driver->driver_name = "tty_mdm6600";
+	mdm_spi_tty_driver->name = "ttyspi";
+	mdm_spi_tty_driver->major = IFX_SPI_MAJOR;
+	mdm_spi_tty_driver->minor_start = 0;
+	mdm_spi_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	mdm_spi_tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	mdm_spi_tty_driver->flags = TTY_DRIVER_REAL_RAW;
+	mdm_spi_tty_driver->init_termios = tty_std_termios;
+	mdm_spi_tty_driver->init_termios.c_cflag = B921600 | CS8 | CREAD | HUPCL | CLOCAL;
+	tty_set_operations(mdm_spi_tty_driver, &mdm_spi_ops);
+    
+	status = tty_register_driver(mdm_spi_tty_driver);
+	if (status) {
+		printk(KERN_ERR "Failed to register mdm_spi_tty_driver");
+		put_tty_driver(mdm_spi_tty_driver);
+		return status;
+	} else {
+		TTYSPI_DEBUG_PRINT("register mdm_spi_tty_driver\n");
+	}
+    
+	/* Register SPI Driver */
+	status = spi_register_driver(&mdm_spi_driver);
+	if (status < 0) {
+		printk(KERN_ERR "Failed to register SPI device");
+		tty_unregister_driver(mdm_spi_tty_driver);
+		put_tty_driver(mdm_spi_tty_driver);
+		return status;
+	} else {
+		TTYSPI_DEBUG_PRINT("register mdm_spi_driver\n");
+	}
+    
+#ifdef TX_BUFFER_QUEUE
+	if (queue_first_time == 1) {
+		spin_lock_init(&spi_nodes_lock);
+		spi_data_send_pending = NULL;
+		queue_first_time = 0;
+	}
 #endif
-
-    /* Register SPI Driver */
-    status = spi_register_driver(&ifx_spi_driver);
-    mspi_rx_wq = create_singlethread_workqueue(MSPI_DRIVER_NAME "_rx");
-    if (status < 0 || mspi_rx_wq == NULL){
-        MSPI_ERR("Failed to register SPI device");
-        tty_unregister_driver(ifx_spi_tty_driver);
-        put_tty_driver(ifx_spi_tty_driver);
-        return status;
-    }
-
-#ifdef SPI2SPI_TEST
-    spi2spi_counter = 0;
-    memset(&s2s_test, 0, sizeof(s2s_test));
-    /* .args_recvd and .state will be zeroes */
-#endif
-
-    mspi_dump_compilation_info();
-    return status;
+    
+	TTYSPI_DEBUG_PRINT("%s end\n", __func__);
+	return status;
 }
 
-module_init(ifx_spi_init);
+module_init(mdm_spi_init);
 
 
 /*
  * Exit function to unregister SPI driver and tty SPI driver
  */
-void
-__exit ifx_spi_exit(void)
+static void __exit mdm_spi_exit(void)
 {
-    spi_unregister_driver(&ifx_spi_driver);
-    tty_unregister_driver(ifx_spi_tty_driver);
-    put_tty_driver(ifx_spi_tty_driver);
-
-#ifdef MSPI_DRV_DEBUG_FS_LEVEL
-    remove_mspi_proc_dbg_file();
-#endif
-
-    if (mspi_rx_wq){
-        flush_workqueue(mspi_rx_wq);
-        destroy_workqueue(mspi_rx_wq);
-        mspi_rx_wq = NULL;
-    }
-
-#ifdef SPI2SPI_TEST
-    spin_lock_bh(&spi2spi_lock);
-    spi2spi_test_is_running = 0;
-    if(spi2spi_tx_buff != NULL)
-    {
-        kfree(spi2spi_tx_buff);
-        spi2spi_tx_buff = NULL;
-    }
-    if(spi2spi_rx_buff != NULL)
-    {
-        kfree(spi2spi_rx_buff);
-        spi2spi_rx_buff = NULL;
-    }
-    spin_unlock_bh(&spi2spi_lock);
-#endif
-
+	TTYSPI_DEBUG_PRINT("%s\n", __func__);
+	spi_unregister_driver(&mdm_spi_driver);
+	tty_unregister_driver(mdm_spi_tty_driver);
+	put_tty_driver(mdm_spi_tty_driver);
 }
 
-module_exit(ifx_spi_exit);
+module_exit(mdm_spi_exit);
 
 /* End of Initialization Functions */
 
-/* ################################################################################################################ */
+/* ######################################################################## */
 
-MODULE_AUTHOR("Teleca / LGE");
-MODULE_DESCRIPTION("MDM6600 SPI Framing Layer: Support Extended Header, Dynamic TX/RX buffers, HAS_MORE, NEXT_FRAME_SIZE");
+MODULE_DESCRIPTION("MDM6600 SPI framing layer for dual spi");
 MODULE_LICENSE("GPL");
-
-

@@ -43,14 +43,6 @@
  * General Public License.
  *
  */
-
-// -------------------- Start of Changes History -------------------------------------
-// when       who     what, where, why
-// --------   ---     ----------------------------------------------------------------
-//                                                             
-// -------------------- End of Changes History ---------------------------------------
-
-#define LGE_FROYO_BSP
 #include <linux/module.h>
 #include <linux/types.h>
 
@@ -71,7 +63,6 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/delay.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -82,1405 +73,342 @@
 #include <linux/semaphore.h>
 #include <linux/mutex.h>
 #include <linux/kthread.h>
-#include <linux/version.h>
+#define TS0710MAX_CHANNELS 32
+#define TS0710MAX_PRIORITY_NUMBER 64
 
 #include "ts0710.h"
 #include "ts0710_mux.h"
 
+#include <linux/delay.h>
 
-/*------------------------------------------------------------------*/
-/* Features                                                         */
-/*------------------------------------------------------------------*/
-/* MSPI to MSPI test mode support */
-#define MSPI2MSPI_TEST
+static int NR_MUXS;
 
-/* This enables wakelock if ts_ldisc_close function is called because of RILD exit */
-#define ENABLE_MUX_WAKE_LOCK
+static struct tty_struct *ipc_tty = NULL;
 
-/* RIL Recovery feature */
-#define RECOVERY_MODE
+typedef struct {
+	u8	cmdtty;
+	u8	datatty;
+} dlci_tty;
 
-/* Whether to use tty_insert_flip_string */
-#define USE_TTY_INSERT
-/*------------------------------------------------------------------*/
-/* END Features                                                     */
-/*------------------------------------------------------------------*/
+static u8 *iscmdtty;
 
-/*------------------------------------------------------------------*/
-/* Driver Name and Version                                          */
-/*------------------------------------------------------------------*/
-#define MUX_DRIVER_NAME                             "ts0710mux"
-#define MUX_DRIVER_VERSION                          "23-mar-12"
-static const char mux_drv_driver_name[]             = MUX_DRIVER_NAME;
-static const char mux_drv_driver_version[]          = MUX_DRIVER_VERSION;
-/*------------------------------------------------------------------*/
-/* END Driver Name and Version                                      */
-/*------------------------------------------------------------------*/
+typedef struct {
+	volatile u8	buf[TS0710MUX_SEND_BUF_SIZE];
+	volatile u8 *	frame;
+	unsigned long	flags;
+	volatile u16	length;
+	volatile u8	filled;
+	volatile u8	dummy; /* Allignment to 4*n bytes */
+} mux_send_struct;
 
-/*------------------------------------------------------------------*/
-/* Debug                                                            */
-/*------------------------------------------------------------------*/
-#define MUX_DRV_DEBUG_LEVEL                         10
-#define MUX_EXTENDED_DEBUG_OUTPUT_FORMAT
-#ifdef MUX_DRV_DEBUG_LEVEL
-static unsigned int debug_level                     = 0;
-#endif
-#ifdef MUX_EXTENDED_DEBUG_OUTPUT_FORMAT
-#define MUX_DEBUG_OUTPUT_FORMAT                     MUX_DRIVER_NAME "(" MUX_DRIVER_VERSION ")"
-#else
-#define MUX_DEBUG_OUTPUT_FORMAT                     MUX_DRIVER_NAME
-#endif
-#define MUX_ERR(msg,args...)                        {printk(KERN_ERR MUX_DEBUG_OUTPUT_FORMAT ":%s: " msg "\n",__func__, ## args);}
-#ifdef MUX_DRV_DEBUG_LEVEL
-#define MUX_ISDBG(level)                            (((level) <= MUX_DRV_DEBUG_LEVEL) && ((level) <= debug_level))
-#define MUX_DBG(level,msg,args...)                  { if (MUX_ISDBG(level)) {printk(KERN_INFO MUX_DEBUG_OUTPUT_FORMAT ": " msg "\n", ## args);}; }
-#define MUX_TRACE(msg,args...)                      { if (MUX_ISDBG(MUX_DRV_DEBUG_LEVEL)) {printk(KERN_INFO MUX_DEBUG_OUTPUT_FORMAT ":%s: " msg "\n", __func__, ## args);}; }
-/* Unconditional message */
-#define UNMUX_DBG(msg,args...)                      { {printk(KERN_INFO MUX_DEBUG_OUTPUT_FORMAT ": " msg "\n", ## args);}; }
-#define MUX_DRV_DEBUG_FS_LEVEL
-#else
-#define MUX_ISDBG(level)                            0
-#define MUX_DBG(level,msg,args...)
-#endif
-/*------------------------------------------------------------------*/
-/* End Debug                                                        */
-/*------------------------------------------------------------------*/
+struct mux_data {
+	enum { OUT_OF_FRAME, INSIDE_FRAME_HEADER, INSIDE_FRAME_BODY, FRAME_ERROR } state;
+	size_t		chunk_size;
+	int		copy_index;
+	int		framelen;
+	unsigned char	chunk[MAX_FRAME_SIZE];
+};
+/* Bit number in flags of mux_send_struct */
 
+struct mux_recv_packet_tag {
+	u8 *				data;
+	u32				length;
+	struct mux_recv_packet_tag *	next;
+};
+typedef struct mux_recv_packet_tag mux_recv_packet;
 
-/*------------------------------------------------------------------*/
-/* Feature specific                                                 */
-/*------------------------------------------------------------------*/
-#ifdef RECOVERY_MODE
-#include <mach/gpio-names.h>
-#include <mach/gpio.h>
+struct mux_recv_struct_tag {
+	u8				data[TS0710MUX_RECV_BUF_SIZE];
+	u32				length;
+	u32				total;
+	mux_recv_packet *		mux_packet;
+	struct mux_recv_struct_tag *	next;
+	int				no_tty;
+	volatile u8			post_unthrottle;
+};
+typedef struct mux_recv_struct_tag mux_recv_struct;
 
-#define GPIO_CP_RESET        TEGRA_GPIO_PV0 //CP_RESET
-#define GPIO_CP_PWRON        TEGRA_GPIO_PV1 //CP_PWRON
-#endif
+static unsigned long mux_recv_flags = 0;
 
-#ifdef ENABLE_MUX_WAKE_LOCK
-#include <linux/wakelock.h>
-#define MUX_WAKELOCK_TIME                           (30*HZ)
-struct wake_lock                s_wake_lock;
-#endif
-/*------------------------------------------------------------------*/
-/* END Feature specific                                             */
-/*------------------------------------------------------------------*/
+static mux_send_struct *mux_send_info[TS0710MAX_CHANNELS];
+static volatile u8 mux_send_info_flags[TS0710MAX_CHANNELS];
+static volatile u8 mux_send_info_idx = TS0710MAX_CHANNELS;
 
-/*------------------------------------------------------------------*/
-/* General definitions                                              */
-/*------------------------------------------------------------------*/
-#ifndef MIN
-#define MIN(a, b)                                   ((a) < (b) ? (a) : (b))
+static mux_recv_struct *mux_recv_info[TS0710MAX_CHANNELS];
+static volatile u8 mux_recv_info_flags[TS0710MAX_CHANNELS];
+static mux_recv_struct *mux_recv_queue = NULL;
+
+/* Local for 2.6? */
+static struct tty_driver *mux_driver;
+
+static struct tty_struct *mux_table[TS0710MAX_CHANNELS];
+static struct ktermios *mux_termios[TS0710MAX_CHANNELS];
+static struct ktermios *mux_termios_locked[TS0710MAX_CHANNELS];
+static volatile short int mux_tty[TS0710MAX_CHANNELS];
+static volatile struct file *mux_filp[TS0710MAX_CHANNELS];
+
+#ifdef min
+#undef min
+#define min(a, b)     ((a) < (b) ? (a) : (b))
 #endif
 
-#define TS0710MAX_PRIORITY_NUMBER                   2
+static ts0710_con ts0710_connection;
 
-volatile int                    ts_ldisc_called     = 0;
+static DEFINE_SEMAPHORE(spi_write_sema); /* use semaphore to synchronize different threads*/
+static struct semaphore spi_write_data_sema[33];
 
-static struct tty_struct        *ipc_tty;
-
-struct mux_data
-{
-    enum {OUT_OF_FRAME, INSIDE_FRAME_HEADER, INSIDE_FRAME_BODY } state;
-    int         framelen;
-    u8          fcs;
+struct spi_data_recived_struct {
+	struct tty_struct *	tty;
+	const u8 *		data;
+	char *			flags;
+	int			size;
+	int			updated;
 };
 
-struct mux_frame_struct
-{
-    struct mux_frame_struct     *next;
-    u8                          *data;
-    int                         size;
-    int                         dlci;
+#define WAITING_FRAMES (200)
+#define RESERVED_FRAMES (8)
+#define MAX_WAITING_FRAMES (RESERVED_FRAMES + WAITING_FRAMES)
+
+struct spi_data_send_struct;
+struct spi_data_send_struct {
+	struct spi_data_send_struct *	next;
+	u8 *				data;
+	int				size;
 };
 
-struct mux_frames_pool_struct
-{
-    spinlock_t                  lock;
-    struct mux_frame_struct     *list_head;
-    int                         capacity;
-    int                         usage;
+DEFINE_SPINLOCK(frame_nodes_lock);
+static unsigned long lock_flag;
+static struct spi_data_send_struct frame_node[MAX_WAITING_FRAMES];
+static struct spi_data_send_struct *frame_to_send[TS0710MAX_PRIORITY_NUMBER];
+static struct spi_data_recived_struct spi_data_recieved;
+static struct task_struct *write_task = NULL;
+static u8 default_priority_table[] = {
+	0,                              /* multiplexer control channel */
+	7,  7,	7,  7,	7,  7,	7,      /* 1-7 DLC   */
+	15, 15, 15, 15, 15, 15, 15, 15, /* 8-15 DLC  */
+	23, 23, 23, 23, 23, 23, 23, 23, /* 16-23 DLC */
+	31, 31, 31, 31, 31, 31, 31, 31, /* 24-31 DLC */
+	39, 39, 39, 39, 39, 39, 39, 39, /* 32-39 DLC */
+	47, 47, 47, 47, 47, 47, 47, 47, /* 40-47 DLC */
+	55, 55, 55, 55, 55, 55, 55, 55, /* 48-55 DLC */
+	61, 61, 61, 61, 61, 61,         /* 56-61 DLC */
+	63, 63                          /* 62-63 DLC */
 };
 
-struct mux_queue_struct;
 
-typedef void (*mux_queue_wm_cb)(struct mux_queue_struct*);
-typedef bool (*mux_queue_find_cb)(struct mux_queue_struct*, struct mux_frame_struct*);
-
-struct mux_queue_struct
+static int max_frame_usage = 0;
+static void nodes_init(void)
 {
-    spinlock_t                      nodes_lock;
-    int                             count;
-
-    void                            *user_data;
-    struct mux_frames_pool_struct   *pool;
-
-    // Nodes list
-    struct mux_frame_struct         *list_head;
-    struct mux_frame_struct         *list_tail;
-
-    // Watermarks
-    mux_queue_wm_cb                 hiwater_cb;
-    int                             hiwater;
-    mux_queue_wm_cb                 lowater_cb;
-    int                             lowater;
-};
-
-static struct tty_driver        *mux_driver;
-static struct tty_struct        *mux_table[TS0710_MAX_CHANNELS];
-static volatile short int       mux_tty[TS0710_MAX_CHANNELS];
-static volatile struct file     *mux_filp[TS0710_MAX_CHANNELS];
-
-static ts0710_con               ts0710_connection;
-
-#define MUX_FLOW_CONTROLLED(dlci_data) ((dlci_data)->state == FLOW_STOPPED || all_flow_off_from_modem)
-
-static u8 default_priority_table[] =
-{
-    0,          /* multiplexer control channel */
-    1           /* ALL DLC */
-};
-/*------------------------------------------------------------------*/
-/* END General definitions                                          */
-/*------------------------------------------------------------------*/
-
-
-/*------------------------------------------------------------------*/
-/* TX definitions                                                   */
-/*------------------------------------------------------------------*/
-#define HI_WM_MUX_TX                                20
-#define LO_WM_MUX_TX                                6
-
-#define MAX_WAITING_FRAMES                          70
-#define MAX_WAITING_FRAMES_OVER                     (MAX_WAITING_FRAMES + (2*TS0710_MAX_CHANNELS))
-
-static struct work_struct       mux_tx_work;
-static struct workqueue_struct  *mux_tx_wq;
-
-static struct mux_queue_struct  mux_tx_q[TS0710MAX_PRIORITY_NUMBER];
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,36))
-static DECLARE_MUTEX(ipc_write_completion);
-#else
-static DEFINE_SEMAPHORE(ipc_write_completion);
-#endif
-static spinlock_t               tx_lock             = SPIN_LOCK_UNLOCKED;
-/*------------------------------------------------------------------*/
-/* END TX definitions                                               */
-/*------------------------------------------------------------------*/
-
-
-/*------------------------------------------------------------------*/
-/* RX definitions                                                   */
-/*------------------------------------------------------------------*/
-#define HI_WM_MUX_RX                                50
-#define LO_WM_MUX_RX                                20
-
-static struct mux_queue_struct  mux_rx_q[TS0710_MAX_CHANNELS];
-
-static volatile int all_flow_off_from_modem                  = 0;
-
-static u8 *mux_cbn_splt_start_frame                 = NULL;
-static u16 mux_cbn_splt_frame_len                   = 0;
-
-static void mux_rx_flush_queue(int dlci);
-static void mux_rx_destroy_queue(int dlci);
-static void mux_rx_handle_work(struct work_struct *pwork);
-/*------------------------------------------------------------------*/
-/* END RX definitions                                               */
-/*------------------------------------------------------------------*/
-
-
-/*------------------------------------------------------------------*/
-/* MSPI2MSPI test mode variables                                    */
-/*------------------------------------------------------------------*/
-#ifdef MSPI2MSPI_TEST
-#define TIOCMSPI2MSPI_T1                            0x5504
-#define TIOCMSPI2MSPI_T2                            0x5505
-#define TIOCMSPI2MSPI_T3                            0x5506
-#define TIOCMSPI2MSPISTOP                           0x5507
-#define TIOCGSTATMSPI                               0x5508
-
-#define MSPI2MSPI_DEF_PACKET_SIZE                   2048
-
-static volatile bool            mspitest_enable     = false;
-static volatile bool            mspitest_tx_enable  = false;
-static volatile bool            mspitest_rx_enable  = false;
-
-static int                      mspitest_frame_size = MSPI2MSPI_DEF_PACKET_SIZE;
-static u8                       *mspi_data;
-
-static uint64_t                 mspi2mspi_tx_counter = 0;
-static uint64_t                 mspi2mspi_rx_counter = 0;
-static spinlock_t               mspi2mspi_lock;
-
-struct mspi2mspi_stat
-{
-    uint64_t tx_counter;
-    uint64_t rx_counter;
-    uint64_t timestamp;
-};
-
-#endif//MSPI2MSPI_TEST
-/*------------------------------------------------------------------*/
-/* END MSPI2MSPI test mode variables                                */
-/*------------------------------------------------------------------*/
-
-
-#ifdef MUX_DRV_DEBUG_FS_LEVEL
-/*--------------------------------------------------------------------*/
-/* Proc file system related DBG functionality for MUX.                */
-/*--------------------------------------------------------------------*/
-#define MUX_PROC_DBG_FILE                           "driver/mux_dbg_level"
-#define MUX_DBG_PROC_BUF_MAX_LEN                    3UL
-
-static struct proc_dir_entry *mux_proc_dbg_file;
-
-static int mux_proc_dbg_read(char *page, char **start, off_t off, int count, int *eof, void *data)
-{
-    int len;
-
-    MUX_DBG(8, "%s called, curr debug_level = %d\n", __FUNCTION__, debug_level);
-    len = sprintf(page, "%d\n", debug_level);
-
-    return len;
-
-}
-
-static int mux_proc_dbg_write(struct file *file, const char __user *buffer, unsigned long count, void *data)
-{
-    char buff[MUX_DBG_PROC_BUF_MAX_LEN];
-    int val;
-    unsigned long len = min(MUX_DBG_PROC_BUF_MAX_LEN, count);
-    MUX_DBG(8, "%s called, curr debug_level = %u, passed count %lu\n", __FUNCTION__, debug_level, count);
-
-    if(copy_from_user(buff, buffer, len))
-        return -EFAULT;
-
-    buff[len-1] = '\0';
-    val = simple_strtoul(buff, NULL, 10);
-
-    if(val >= 0 && val <= MUX_DRV_DEBUG_LEVEL)
-    {
-        debug_level = (unsigned int)val;
-        MUX_DBG(8, "%s: updated debug_level = %u\n", __FUNCTION__, debug_level);
-    }
-
-    return len;
-}
-
-static void create_mux_proc_dbg_file(void)
-{
-    mux_proc_dbg_file = create_proc_entry(MUX_PROC_DBG_FILE, 0664, NULL);
-
-    if(mux_proc_dbg_file != NULL)
-    {
-        mux_proc_dbg_file->read_proc = mux_proc_dbg_read;
-        mux_proc_dbg_file->write_proc = mux_proc_dbg_write;
-    }
-    else
-        MUX_ERR(" MUX DBG proc file create failed!\n");
-}
-
-static void remove_mux_proc_dbg_file(void)
-{
-    remove_proc_entry(MUX_PROC_DBG_FILE, NULL);
-}
-
-#endif //MUX_DRV_DEBUG_FS_LEVEL
-/*--------------------------------------------------------------------*/
-/* END Proc file system related DBG functionality for MUX.            */
-/*--------------------------------------------------------------------*/
-
-/*--------------------------------------------------------------------*/
-/* Queue and pool interfaces.                                         */
-/*--------------------------------------------------------------------*/
-static struct mux_frame_struct          frame_node[MAX_WAITING_FRAMES_OVER];
-static struct mux_frames_pool_struct    frames_pool;
-static volatile int                     frame_usage                                 = 0;
-
-/* Initialize the frames pool */
-static int mux_pool_init( struct mux_frames_pool_struct *pool,
-                          struct mux_frame_struct *frames_array,
-                          int count )
-{
-    int i;
-
-    if( (pool == NULL) || (count <= 0) || (frames_array == NULL) )
-    {
-        return -EINVAL;
-    }
-
-    spin_lock_init(&pool->lock);
-
-    pool->capacity = count;
-
-    count--;
-
-    for(i = 0; i < count; i++)
-    {
-        frames_array[i].next = &frames_array[i+1];
-        frames_array[i].data = NULL;
-        frames_array[i].size = 0;
-        frames_array[i].dlci = 0;
-    }
-
-    frames_array[count].next = NULL;
-    frames_array[count].data = NULL;
-    frames_array[count].size = 0;
-    frames_array[count].dlci = 0;
-
-    pool->list_head = &frames_array[0];
-
-    pool->usage = 0;
-
-    return 0;
-}
-
-/* Assign the pool to the queue to be used for mux_queue_alloc */
-static int mux_queue_pool_set( struct mux_queue_struct    *q,
-                               struct mux_frames_pool_struct *pool )
-{
-    if((q == NULL) || (pool == NULL) || (pool->capacity == 0))
-        return -EINVAL;
-
-    q->pool = pool;
-
-    return 0;
-}
-
-/* Initialize the queue */
-static int mux_queue_init( struct mux_queue_struct    *q,
-                           mux_queue_wm_cb            hiwater_cb,
-                           int                        hiwater,
-                           mux_queue_wm_cb            lowater_cb,
-                           int                        lowater,
-                           void                       *user_data )
-{
-    spin_lock_init(&q->nodes_lock);
-    q->count = 0;
-
-    q->list_head = q->list_tail = 0;
-
-    q->hiwater_cb = hiwater_cb;
-    q->hiwater = hiwater;
-
-    q->lowater_cb = lowater_cb;
-    q->lowater = lowater;
-
-    q->user_data = user_data;
-
-    return 0;
-}
-
-/* Allocate the new node for the specified queue */
-static struct mux_frame_struct*
-mux_queue_alloc(struct mux_queue_struct *q)
-{
-    struct mux_frame_struct     *node = NULL;
-
-    if(q->pool != NULL)
-    {
-        struct mux_frames_pool_struct   *pool = q->pool;
-
-        spin_lock_bh(&pool->lock);
-
-        if (pool->list_head != NULL)
-        {
-            node = pool->list_head;
-            pool->list_head = pool->list_head->next;
-        }
-
-        spin_unlock_bh(&pool->lock);
-
-        if(node != NULL)
-            node->next = NULL;
-    }
-    else
-    {
-        node = (struct mux_frame_struct*)kzalloc(sizeof(struct mux_frame_struct), GFP_KERNEL);
-    }
-
-    return node;
-}
-
-/* Free the node of the specified queue */
-static int mux_queue_free(struct mux_queue_struct *q, struct mux_frame_struct *node)
-{
-    if(q->pool != NULL)
-    {
-        struct mux_frames_pool_struct *pool = q->pool;
-
-        spin_lock_bh(&pool->lock);
+	int i;
     
-        node->next = pool->list_head;
-        pool->list_head = node;
+	spin_lock_irqsave(&frame_nodes_lock, lock_flag);
+	for (i = 0; i < MAX_WAITING_FRAMES; i++) {
+		frame_node[i].next = NULL;
+		frame_node[i].data = NULL;
+		frame_node[i].size = 0;
+	}
+	for (i = 0; i < TS0710MAX_PRIORITY_NUMBER; i++)
+		frame_to_send[i] = NULL;
+	spin_unlock_irqrestore(&frame_nodes_lock, lock_flag);
+}
+
+static int node_put_to_send(u8 dlci, u8 *data, int size)
+{
+	int i;
+	int retval = 0;
+	int free_node = MAX_WAITING_FRAMES + 1;
+	struct spi_data_send_struct *new_frame;
+    //    u8 * buf;
+	u8 priority;
+	int frame_count = 0;
     
-        spin_unlock_bh(&pool->lock);
-    }
-    else
-    {
-        kfree(node);
-    }
-
-    return 0;
+	priority = ts0710_connection.dlci[dlci].priority;
+    //    buf = kmalloc(size, GFP_ATOMIC);
+    //    if (buf)
+    //         memcpy(buf, data, size);
+    //    else
+    //    {
+    //         printk("\nTS0710:node_put_to_send:buf null, return ENOMEM\r\n");
+    //         return -ENOMEM;
+    //    }
+    
+	spin_lock_irqsave(&frame_nodes_lock, lock_flag);
+	for (i = 0; i < (MAX_WAITING_FRAMES - RESERVED_FRAMES); i++) {
+		if (frame_node[i].size == 0) {
+			free_node = i;
+			if (free_node > max_frame_usage)
+				max_frame_usage = free_node;
+			break;
+		}
+	}
+    
+	if ((i == (MAX_WAITING_FRAMES - RESERVED_FRAMES)) && (dlci == 1)) { // The last area is reserved for pts1.
+		TS0710_DEBUG("\n last frame_node()++ free_node(%d) i=%d dlci=%d \r\n",
+                     free_node, i,
+                     dlci);
+		for (; i < MAX_WAITING_FRAMES; i++) {
+			if (frame_node[i].size == 0) {
+				free_node = i;
+				if (free_node > max_frame_usage)
+					max_frame_usage = free_node;
+				break;
+			}
+		}
+		TS0710_DEBUG("\n last frame_node()-- free_node(%d) i=%d dlci=%d \r\n",
+                     free_node, i,
+                     dlci);
+        
+		if (free_node >= MAX_WAITING_FRAMES)
+			//WBT #219235
+			printk("\n NOT enough frame_node i=%d for dlci=%d \n", i, dlci);
+	}
+    
+	if (free_node < MAX_WAITING_FRAMES) {
+		frame_node[free_node].next = NULL;
+		frame_node[free_node].data = data;
+		frame_node[free_node].size = size;
+		retval = size;
+		if (frame_to_send[priority] == NULL) {
+			frame_to_send[priority] = &frame_node[free_node];
+		} else {
+			new_frame = frame_to_send[priority];
+			while (new_frame->next != NULL) {
+				new_frame = new_frame->next;
+				frame_count++;
+				if (frame_count > MAX_WAITING_FRAMES) {
+					printk(
+                           "\n Never hit this case : frame_count(%d) > MAX_WAITING_FRAMES[%d]\r\n",
+                           frame_count, MAX_WAITING_FRAMES);
+					break;
+				}
+			}
+			new_frame->next = &frame_node[free_node];
+		}
+	}
+	spin_unlock_irqrestore(&frame_nodes_lock, lock_flag);
+    
+	if (free_node >= MAX_WAITING_FRAMES) {
+		TS0710_DEBUG("\nTS0710 free_node[%d] < MAX_WAITING_FRAMES\r\n", free_node);
+		kfree(data);
+		retval = -ENOMEM;
+	}
+    
+	if (retval > 0)
+		up(&spi_write_sema);
+    
+	return retval;
 }
-
-/* Returns packet count in the queue */
-static int mux_queue_count(struct mux_queue_struct *q)
-{
-    int count;
-
-    spin_lock_bh(&q->nodes_lock);
-    count = q->count;
-    spin_unlock_bh(&q->nodes_lock);
-
-    return count;
-}
-
-/* Add the packet to the queue tail */
-static int mux_queue_enqueue(struct mux_queue_struct *q, struct mux_frame_struct *node)
-{
-    if(node == NULL)
-    {
-        return -EINVAL;
-    }
-
-    spin_lock_bh(&q->nodes_lock);
-
-    if(q->list_head == NULL)
-    {
-        q->list_head = node;
-        q->list_tail = node;
-    }
-    else
-    {
-        q->list_tail->next = node;
-        q->list_tail = node;
-    }
-
-    q->count++;
-
-    if((q->count > q->hiwater) && (q->hiwater_cb != NULL))
-    {
-        (q->hiwater_cb)(q);
-    }
-
-    spin_unlock_bh(&q->nodes_lock);
-
-    return 0;
-}
-
-/* Remove the packet from the queue head */
-static struct mux_frame_struct*
-mux_queue_dequeue(struct mux_queue_struct *q)
-{
-    struct mux_frame_struct *node = NULL;
-
-    spin_lock_bh(&q->nodes_lock);
-
-    if(q->list_head != NULL)
-    {
-        node = q->list_head;
-        q->list_head = node->next;
-
-        q->count--;
-
-        if((q->count < q->lowater) && (q->lowater_cb != NULL))
-        {
-            (q->lowater_cb)(q);
-        }
-    }
-
-    spin_unlock_bh(&q->nodes_lock);
-
-    return node;
-}
-
-/* Clear the queue. All nodes will be passed to flush_fn callback */
-static void mux_queue_flush(struct mux_queue_struct *q, mux_queue_find_cb flush_fn)
-{
-    struct mux_frame_struct *node = NULL;
-
-    if(spin_is_locked(&q->nodes_lock))
-        spin_unlock(&q->nodes_lock);
-
-    spin_lock_bh(&q->nodes_lock);
-    while(q->list_head != NULL)
-    {
-        node = q->list_head;
-        q->list_head = node->next;
-
-        if(flush_fn != NULL)
-        {
-            flush_fn(q, node);
-        }
-
-        mux_queue_free(q, node);
-    }
-
-    q->count = 0;
-    spin_unlock_bh(&q->nodes_lock);
-}
-
-/* Search the queue for the specific node and dequeue it.
-   find_fn is a search callback, node will be dequeued if it returns true */
-static struct mux_frame_struct*
-mux_queue_search(struct mux_queue_struct *q, mux_queue_find_cb find_fn)
-{
-    struct mux_frame_struct **prev;
-    struct mux_frame_struct *cur;
-
-    if(q == NULL || find_fn == NULL)
-    {
-        return NULL;
-    }
-
-    spin_lock_bh(&q->nodes_lock);
-
-    prev = &q->list_head;
-    cur = q->list_head;
-    while(cur != NULL)
-    {
-        if(find_fn(q, cur))
-        {
-            *prev = cur->next;
-            break;
-        }
-
-        prev = &cur->next;
-        cur = cur->next;
-    }
-
-    spin_unlock_bh(&q->nodes_lock);
-
-    return cur;
-}
-/*--------------------------------------------------------------------*/
-/* END Queue and pool interfaces.                                     */
-/*--------------------------------------------------------------------*/
-
-
-/*--------------------------------------------------------------------*/
-/* Forward declarations                                               */
-/*--------------------------------------------------------------------*/
-static int mux_tx_send_frame(u8 dlci, int initiator, enum mux_frametype frametype, const u8 data[], int len);
-static void mux_rx_queue_hiwater_cb(struct mux_queue_struct *q);
-static void mux_rx_queue_lowater_cb(struct mux_queue_struct *q);
-static void ts_ldisc_flush_buffer(struct tty_struct *tty);
-/*--------------------------------------------------------------------*/
-/* END Forward declarations                                           */
-/*--------------------------------------------------------------------*/
-
-/*--------------------------------------------------------------------*/
-/* MUX General code                                                   */
-/*--------------------------------------------------------------------*/
 
 static void ts0710_reset_dlci(u8 j)
 {
-    if (j >= TS0710_MAX_CHANNELS)
-        return;
-
-    ts0710_connection.dlci[j].state             = DISCONNECTED;
-    ts0710_connection.dlci[j].rx.flow_disabled  = false;
-    ts0710_connection.dlci[j].mtu               = DEF_TS0710_MTU;
-    init_waitqueue_head(&ts0710_connection.dlci[j].open_wait);
-    init_waitqueue_head(&ts0710_connection.dlci[j].close_wait);
+	if (j >= TS0710_MAX_CHN)
+		return;
+    
+	ts0710_connection.dlci[j].state = DISCONNECTED;
+	ts0710_connection.dlci[j].flow_control = 0;
+	ts0710_connection.dlci[j].mtu = DEF_TS0710_MTU;
+	ts0710_connection.dlci[j].initiated = 0;
+	ts0710_connection.dlci[j].initiator = 0;
+	init_waitqueue_head(&ts0710_connection.dlci[j].open_wait);
+	init_waitqueue_head(&ts0710_connection.dlci[j].close_wait);
 }
 
 static void ts0710_reset_dlci_priority(void)
 {
-    u8 j;
-
-    ts0710_connection.dlci[0].priority = default_priority_table[0];
-
-    for (j = 1; j < TS0710_MAX_CHANNELS; j++)
-        ts0710_connection.dlci[j].priority = default_priority_table[1];
+	u8 j;
+    
+	for (j = 0; j < TS0710_MAX_CHN; j++)
+		ts0710_connection.dlci[j].priority = default_priority_table[j];
 }
 
 static void ts0710_reset_con(void)
 {
-    u8 j;
-
-    ts0710_connection.initiator     = 0;
-    ts0710_connection.mtu           = DEF_TS0710_MTU + TS0710_MAX_HDR_SIZE;
-    ts0710_connection.be_testing    = 0;
-    ts0710_connection.test_errs     = 0;
-    init_waitqueue_head(&ts0710_connection.test_wait);
-
-    ts0710_reset_dlci_priority();
-
-    for (j = 0; j < TS0710_MAX_CHANNELS; j++)
-        ts0710_reset_dlci(j);
+	u8 j;
+    
+	ts0710_connection.initiator = 0;
+	ts0710_connection.mtu = DEF_TS0710_MTU + TS0710_MAX_HDR_SIZE;
+	ts0710_connection.be_testing = 0;
+	ts0710_connection.test_errs = 0;
+	init_waitqueue_head(&ts0710_connection.test_wait);
+    
+	ts0710_reset_dlci_priority();
+    
+	for (j = 0; j < TS0710_MAX_CHN; j++)
+		ts0710_reset_dlci(j);
 }
 
 static void ts0710_init(void)
 {
-    fcs_init();
-
-    ts0710_reset_con();
+	fcs_init();
+    
+	ts0710_reset_con();
 }
 
 static void ts0710_upon_disconnect(void)
 {
-    ts0710_con *ts0710 = &ts0710_connection;
-    u8 j;
-
-    for (j = 0; j < TS0710_MAX_CHANNELS; j++) {
-        ts0710->dlci[j].state = DISCONNECTED;
-        wake_up_interruptible(&ts0710->dlci[j].open_wait);
-        wake_up_interruptible(&ts0710->dlci[j].close_wait);
-    }
-    ts0710->be_testing = 0;
-    wake_up_interruptible(&ts0710->test_wait);
-    ts0710_reset_con();
+	ts0710_con *ts0710 = &ts0710_connection;
+	u8 j;
+    
+	for (j = 0; j < TS0710_MAX_CHN; j++) {
+		ts0710->dlci[j].state = DISCONNECTED;
+		wake_up_interruptible(&ts0710->dlci[j].open_wait);
+		wake_up_interruptible(&ts0710->dlci[j].close_wait);
+	}
+	ts0710->be_testing = 0;
+	wake_up_interruptible(&ts0710->test_wait);
+	ts0710_reset_con();
 }
+
+/* Sending packet functions */
 
 /* See TS 07.10's Section 5.2.1.6 */
 static u_int8_t fcs_table[0x100];
-
 static void fcs_init(void)
 {
-    int i, bit;
-    u8 reg, nreg;
-
-    for (i = 0; i < 0x100; i++) {
-        for (reg = bit = 0; bit < 8; bit++, reg = nreg) {
-            nreg = reg >> 1;
-            if (((i >> bit) ^ reg) & 1)
-                nreg ^= 0xe0;   /* x^8 + x^2 + x + 1 */
-        }
-
-        fcs_table[i] = reg;
-    }
+	int i, bit;
+	u8 reg, nreg;
+    
+	for (i = 0; i < 0x100; i++) {
+		for (reg = bit = 0; bit < 8; bit++, reg = nreg) {
+			nreg = reg >> 1;
+			if (((i >> bit) ^ reg) & 1)
+				nreg ^= 0xe0;  /* x^8 + x^2 + x + 1 */
+		}
+        
+		fcs_table[i] = reg;
+	}
 }
 
 /* Computes the FCS checksum for a chunk of data.  */
 static u_int8_t mux_fcs_compute(const u8 payload[], int len)
 {
-    u8 gen_reg;
-
-    gen_reg = ~0;
-    while (len--)
-        gen_reg = fcs_table[gen_reg ^ *(payload++)];
-
-    return ~gen_reg;
-}
-
-
-/* Creates a UA packet and puts it at the beginning of the pkt pointer */
-static void send_ua(ts0710_con * ts0710, u8 dlci)
-{
-    mux_tx_send_frame(dlci, !ts0710->initiator, MUX_UA, 0, 0);
-}
-
-/* Creates a DM packet and puts it at the beginning of the pkt pointer */
-static void send_dm(ts0710_con * ts0710, u8 dlci)
-{
-    mux_tx_send_frame(dlci, !ts0710->initiator, MUX_DM, 0, 0);
-}
-
-static void send_sabm(ts0710_con * ts0710, u8 dlci)
-{
-    mux_tx_send_frame(dlci, ts0710->initiator, MUX_SABM, 0, 0);
-}
-
-static void send_disc(ts0710_con * ts0710, u8 dlci)
-{
-    mux_tx_send_frame(dlci, !ts0710->initiator, MUX_DISC, 0, 0);
-}
-
-/* Multiplexer command packets functions */
-
-/* Turns on the ts0710 flow control */
-static void ts0710_fcon_msg(ts0710_con * ts0710, u8 cr)
-{
-    mux_send_uih(ts0710, cr, FCON, 0, 0);
-}
-
-/* Turns off the ts0710 flow control */
-static void ts0710_fcoff_msg(ts0710_con * ts0710, u8 cr)
-{
-    mux_send_uih(ts0710, cr, FCOFF, 0, 0);
-}
-
-
-/* Sends an PN-messages and sets the not negotiable parameters to their
-   default values in ts0710 */
-
-static void send_pn_msg(ts0710_con * ts0710, u8 prior, u32 frame_size,
-               u8 credit_flow, u8 credits, u8 dlci, u8 cr)
-{
-    u8 data[8];
-    pn_t *send = (pn_t *)data;
-
-    send->res1              = 0;
-    send->res2              = 0;
-    send->dlci              = dlci;
-    send->frame_type        = 0;
-    send->credit_flow       = credit_flow;
-    send->prior             = prior;
-    send->ack_timer         = 0;
-
-    send->frame_sizel       = frame_size & 0xFF;
-    send->frame_sizeh       = frame_size >> 8;
-
-    send->credits           = credits;
-    send->max_nbrof_retrans = 0;
-
-    mux_send_uih(ts0710, cr, PN, data, 8);
-}
-
-/* Send a Not supported command - command, which needs 3 bytes */
-static void send_nsc_msg(ts0710_con * ts0710, mcc_type cmd, u8 cr)
-{
-    mux_send_uih(ts0710, cr, NSC, (u8 *) &cmd, 1);
-}
-
-static void mux_send_uih(ts0710_con * ts0710, u8 cr, u8 type, u8 *data, int len)
-{
-    u8 *send = kmalloc(len + 2, GFP_KERNEL);
-    mcc_short_frame_head *head = NULL;
-
-    if (send == NULL)
-        return;
-
-    head                        = (mcc_short_frame_head *)send;
-    head->type.ea               = 1;
-    head->type.cr               = cr;
-    head->type.type             = type;
-    head->length.ea             = 1;
-    head->length.len            = len;
-
-    if (len > 0)
-    {
-        memcpy(send + 2, data, len);
-    }
-
-    mux_tx_send_frame(CTRL_CHAN, ts0710->initiator, MUX_UIH, send, len + 2);
-
-    kfree(send);
-}
-
-static int ts0710_msc_msg(ts0710_con * ts0710, u8 value, u8 cr, u8 dlci)
-{
-    u8 buf[2];
-    msc_t *send = (msc_t *)buf;
-
-    send->dlci.ea           = 1;
-    send->dlci.cr           = 1;
-    send->dlci.d            = dlci & 1;
-    send->dlci.server_chn   = (dlci >> 1) & 0x1f;
-    send->v24_sigs          = value;
-
-    mux_send_uih(ts0710, cr, MSC, buf, 2);
-
-    return 0;
-}
-
-/* Parses a multiplexer control channel packet */
-static void process_mcc(u8 * data, ts0710_con * ts0710, int longpkt)
-{
-    mcc_short_frame *mcc_short_pkt;
-    int             i;
-
-    if (longpkt)
-        mcc_short_pkt = (mcc_short_frame *) (((long_frame *) data)->data);
-    else
-        mcc_short_pkt = (mcc_short_frame *) (((short_frame *) data)->data);
-
-    switch (mcc_short_pkt->h.type.type)
-    {
-
-        case FCON:      /*Flow control on command */
-            MUX_DBG(2,"MUX Received Flow control(all channels) on command\n");
-            if (mcc_short_pkt->h.type.cr == MCC_CMD) {
-                all_flow_off_from_modem = 0;
-
-                for(i = 1; i < TS0710_MAX_CHANNELS; i++)
-                {
-                    dlci_struct *dlci_data = &ts0710->dlci[i];
-                    if(!MUX_FLOW_CONTROLLED(dlci_data))
-                    {
-                        up(&dlci_data->tx.write_sema);
-                        (void)down_trylock(&dlci_data->tx.write_sema);
-                    }
-                }
-            }
-            break;
-
-        case FCOFF:     /*Flow control off command */
-            MUX_DBG(2,"MUX Received Flow control(all channels) off command\n");
-            if (mcc_short_pkt->h.type.cr == MCC_CMD)
-            {
-                all_flow_off_from_modem = 1;
-            }
-            break;
-
-        case MSC:       /*Modem status command */
-            {
-                int                 dlci;
-                u8                  v24_sigs;
-                dlci_struct         *dlci_data;
-
-                dlci = (mcc_short_pkt->value[0]) >> 2;
-                v24_sigs = mcc_short_pkt->value[1];
-                dlci_data = &ts0710->dlci[dlci];
-
-                if ((dlci_data->state != CONNECTED)
-                    && (dlci_data->state != FLOW_STOPPED)) {
-                    send_dm(ts0710, dlci);
-                    break;
-                }
-
-                if (mcc_short_pkt->h.type.cr == MCC_CMD) {
-                    MUX_DBG(7,"Received Modem status command\n");
-                    if ((v24_sigs & 2) && (dlci_data->state == CONNECTED))
-                    {
-                        MUX_DBG(2,"MUX Received Flow off on dlci %d\n", dlci);
-                        dlci_data->state = FLOW_STOPPED;
-                    }
-                    else if(MUX_STOPPED(ts0710,dlci))
-                    {
-                        dlci_data->state = CONNECTED;
-                        MUX_DBG(2,"MUX Received Flow on on dlci %d\n", dlci);
-                        if(!MUX_FLOW_CONTROLLED(dlci_data))
-                        {
-                            up(&dlci_data->tx.write_sema);
-                            down_trylock(&dlci_data->tx.write_sema);
-                        }
-                    }
-
-                    ts0710_msc_msg(ts0710, v24_sigs, MCC_RSP, dlci);
-                } else {
-                    MUX_DBG(7,"Received Modem status response\n");
-                    if (v24_sigs & 2) {
-                        MUX_DBG(3,"Flow stop accepted\n");
-                    }
-                }
-                break;
-            }
-
-        case PN:        /*DLC parameter negotiation */
-            {
-                int                 dlci;
-                u16                 frame_size;
-                pn_msg              *pn_pkt;
-                dlci_struct         *dlci_data;
-
-                pn_pkt = (pn_msg *) data;
-                dlci = pn_pkt->dlci;
-                frame_size = GET_PN_MSG_FRAME_SIZE(pn_pkt);
-                dlci_data = &ts0710->dlci[dlci];
-                MUX_DBG(7,"Received DLC parameter negotiation, PN\n");
-
-                if (pn_pkt->mcc_s_head.type.cr == MCC_CMD) {
-                    MUX_DBG(7,"received PN command with frame size:%d\n", frame_size);
-
-                    frame_size = MIN(frame_size, dlci_data->mtu);
-                    send_pn_msg(ts0710, pn_pkt->prior, frame_size, 0, 0, dlci, MCC_RSP);
-                    dlci_data->mtu = frame_size;
-                    MUX_DBG(7,"process_mcc : mtu set to %d\n", dlci_data->mtu);
-                } else {
-                    MUX_DBG(7,"received PN response with frame size:%d\n", frame_size);
-
-                    frame_size = MIN(frame_size, dlci_data->mtu);
-                    dlci_data->mtu = frame_size;
-
-
-                    if (dlci_data->state == NEGOTIATING) {
-                        dlci_data->state = CONNECTING;
-                        wake_up_interruptible(&dlci_data->open_wait);
-                    }
-                }
-                break;
-            }
-
-        case NSC:       /*Non supported command resonse */
-            MUX_ERR("MUX Received Non supported command response\n");
-            break;
-
-        default:        /*Non supported command received */
-            MUX_ERR("MUX Received a non supported command\n");
-            send_nsc_msg(ts0710, mcc_short_pkt->h.type, MCC_RSP);
-            break;
-    }
-}
-
-static void ts0710_flow_on(int dlci, ts0710_con *ts0710)
-{
-    if ((!((ts0710->dlci[0].state) & (CONNECTED | FLOW_STOPPED)))
-        || (!((ts0710->dlci[dlci].state) & (CONNECTED | FLOW_STOPPED)))
-        || (ts0710->dlci[dlci].rx.flow_disabled == false))
-        return;
-
-    MUX_DBG(2,"MUX send Flow on on dlci %d\n", dlci);
-
-    ts0710_msc_msg(ts0710, EA | RTC | RTR | DV, MCC_CMD, dlci);
-
-    ts0710->dlci[dlci].rx.flow_disabled = false;
-}
-
-static void ts0710_flow_off(int dlci, ts0710_con *ts0710)
-{
-    if (((ts0710->dlci[0].state != CONNECTED) && (ts0710->dlci[0].state != FLOW_STOPPED))
-        || ((ts0710->dlci[dlci].state != CONNECTED) && (ts0710->dlci[dlci].state != FLOW_STOPPED))
-        || (ts0710->dlci[dlci].rx.flow_disabled == true))
-        return;
-
-    MUX_DBG(2,"MUX send Flow off on dlci %d\n", dlci);
-
-    ts0710_msc_msg(ts0710, EA | FC | RTC | RTR | DV, MCC_CMD, dlci);
-
-    ts0710->dlci[dlci].rx.flow_disabled = true;
-}
-
-
-/* Close ts0710 channel */
-static void ts0710_close_channel(int dlci)
-{
-    ts0710_con                    *ts0710 = &ts0710_connection;
-    int                           try;
-    unsigned long                 t;
-
-    MUX_DBG(5,"Close channel %d\n", dlci);
-
-    if ((ts0710->dlci[dlci].state == DISCONNECTED)
-        || (ts0710->dlci[dlci].state == REJECTED)
-        || (ts0710->dlci[dlci].state == DISCONNECTING))
-            return;
-
-    ts0710->dlci[dlci].state = DISCONNECTING;
-    try = TS0710MUX_DISC_TRIES;
-    while (try--)
-    {
-        t = jiffies;
-        send_disc(ts0710, dlci);
-        interruptible_sleep_on_timeout(&ts0710->dlci[dlci].
-                           close_wait,
-                           TS0710MUX_TIME_OUT);
-        if (ts0710->dlci[dlci].state == DISCONNECTED) {
-            break;
-        } else if (signal_pending(current)) {
-            MUX_DBG(6,"MUX DLCI %d Send DISC got signal!\n", dlci);
-            break;
-        } else if ((jiffies - t) >= TS0710MUX_TIME_OUT) {
-            MUX_DBG(6,"MUX DLCI %d Send DISC timeout!\n", dlci);
-            continue;
-        }
-    }
-
-    if (ts0710->dlci[dlci].state != DISCONNECTED)
-    {
-        if (dlci == 0) {
-            ts0710_upon_disconnect();
-        } else {
-            ts0710->dlci[dlci].state = DISCONNECTED;
-            wake_up_interruptible(&ts0710->dlci[dlci].
-                          close_wait);
-            ts0710_reset_dlci(dlci);
-        }
-    }
-
-
-    mux_rx_flush_queue(dlci);
-    mux_rx_destroy_queue(dlci);
-}
-
-static int ts0710_open_channel(int dlci)
-{
-    ts0710_con *ts0710 = &ts0710_connection;
-    int try;
-    int retval;
-    unsigned long t;
-    unsigned char wq_name[10];
-    dlci_struct      *dlci_data = &ts0710->dlci[dlci];
-
-    if(dlci_data->rx.workqueue == NULL)
-    {
-        INIT_WORK(&(dlci_data->rx.work.work), mux_rx_handle_work);
-        dlci_data->rx.work.dlci = dlci;
-        sprintf(wq_name, "muxrx_%d", dlci);
-        dlci_data->rx.workqueue = create_singlethread_workqueue(wq_name);
-        dlci_data->rx.flow_disabled = false;
-        sema_init(&dlci_data->rx.rx_completion, 0);
-        dlci_data->dlci = dlci;
-
-        mux_queue_init( &mux_rx_q[dlci],
-                        mux_rx_queue_hiwater_cb,
-                        HI_WM_MUX_RX,
-                        mux_rx_queue_lowater_cb,
-                        LO_WM_MUX_RX,
-                        dlci_data );
-
-    }
-
-    retval = -ENODEV;
-    if (dlci == 0) {    /* control channel */
-        if (ts0710->dlci[0].state & (CONNECTED | FLOW_STOPPED)) {
-            return 0;
-        } else if (ts0710->dlci[0].state == CONNECTING) {
-            /* Reentry */
-            MUX_DBG(5,"MUX DLCI: 0, reentry to open DLCI 0, pid: %d, %s !\n",
-                current->pid, current->comm);
-
-            try = TS0710MUX_SABM_TRIES;
-            while (try--) {
-                t = jiffies;
-                interruptible_sleep_on_timeout(&ts0710->dlci[0].open_wait,
-                                   TS0710MUX_TIME_OUT);
-                if ((ts0710->dlci[0].state == CONNECTED)
-                    || (ts0710->dlci[0].state ==
-                    FLOW_STOPPED)) {
-                    retval = 0;
-                    break;
-                } else if (ts0710->dlci[0].state == REJECTED) {
-                    retval = -EREJECTED;
-                    break;
-                } else if (ts0710->dlci[0].state ==
-                       DISCONNECTED) {
-                    break;
-                } else if (signal_pending(current)) {
-                    MUX_DBG(6,"MUX DLCI:%d Wait for connecting got signal!\n", dlci);
-                    retval = -EAGAIN;
-                    break;
-                } else if ((jiffies - t) >= TS0710MUX_TIME_OUT) {
-                    MUX_DBG(6,"MUX DLCI:%d Wait for connecting timeout!\n",dlci);
-                    continue;
-                } else if (ts0710->dlci[0].state == CONNECTING) {
-                    continue;
-                }
-            }
-
-            if (ts0710->dlci[0].state == CONNECTING) {
-                ts0710->dlci[0].state = DISCONNECTED;
-            }
-        } else if ((ts0710->dlci[0].state != DISCONNECTED)
-               && (ts0710->dlci[0].state != REJECTED)) {
-            MUX_DBG(6,"MUX DLCI:%d state is invalid!\n", dlci);
-            return retval;
-        } else {
-            ts0710->initiator = 1;
-            ts0710->dlci[0].state = CONNECTING;
-
-            t = jiffies;
-            send_sabm(ts0710, 0);
-            interruptible_sleep_on_timeout(&ts0710->dlci[0].
-                    open_wait,
-                    TS0710MUX_TIME_OUT);
-            if ((ts0710->dlci[0].state == CONNECTED)
-                    || (ts0710->dlci[0].state ==
-                        FLOW_STOPPED)) {
-                retval = 0;
-            } else if (ts0710->dlci[0].state == REJECTED) {
-                MUX_DBG(6,"MUX DLCI:%d Send SABM got rejected!\n",dlci);
-                retval = -EREJECTED;
-            } else if (signal_pending(current)) {
-                MUX_DBG(6,"MUX DLCI:%d Send SABM got signal!\n", dlci);
-                retval = -EAGAIN;
-            } else if ((jiffies - t) >= TS0710MUX_TIME_OUT) {
-                MUX_DBG(6,"MUX DLCI:%d Send SABM timeout!\n",dlci);
-                retval = -ENODEV;
-            }
-
-            if (ts0710->dlci[0].state == CONNECTING) {
-                ts0710->dlci[0].state = DISCONNECTED;
-            }
-            wake_up_interruptible(&ts0710->dlci[0].open_wait);
-        }
-    } else {        /* other channel */
-        if ((ts0710->dlci[0].state != CONNECTED)
-            && (ts0710->dlci[0].state != FLOW_STOPPED)) {
-            return retval;
-        } else if ((ts0710->dlci[dlci].state == CONNECTED)
-               || (ts0710->dlci[dlci].state == FLOW_STOPPED)) {
-            return 0;
-        } else if ((ts0710->dlci[dlci].state == NEGOTIATING)
-               || (ts0710->dlci[dlci].state == CONNECTING)) {
-            /* Reentry */
-
-            t = jiffies;
-            interruptible_sleep_on_timeout(&ts0710->
-                               dlci[dlci].
-                               open_wait,
-                               TS0710MUX_TIME_OUT);
-            if ((ts0710->dlci[dlci].state == CONNECTED)
-                || (ts0710->dlci[dlci].state ==
-                FLOW_STOPPED)) {
-                retval = 0;
-            } else if (ts0710->dlci[dlci].state == REJECTED) {
-                retval = -EREJECTED;
-            } else if (signal_pending(current)) {
-                retval = -EAGAIN;
-            }
-
-            if ((ts0710->dlci[dlci].state == NEGOTIATING)
-                || (ts0710->dlci[dlci].state == CONNECTING)) {
-                ts0710->dlci[dlci].state = DISCONNECTED;
-            }
-        } else if ((ts0710->dlci[dlci].state != DISCONNECTED)
-               && (ts0710->dlci[dlci].state != REJECTED)) {
-            MUX_DBG(6,"MUX DLCI:%d state is invalid!\n", dlci);
-            return retval;
-        } else {
-            ts0710->dlci[dlci].state = CONNECTING;
-            if (ts0710->dlci[dlci].state == CONNECTING) {
-
-                t = jiffies;
-                send_sabm(ts0710, dlci);
-                interruptible_sleep_on_timeout(&ts0710->
-                                   dlci
-                                   [dlci].
-                                   open_wait,
-                                   TS0710MUX_TIME_OUT);
-                if ((ts0710->dlci[dlci].state ==
-                     CONNECTED)
-                    || (ts0710->dlci[dlci].state ==
-                    FLOW_STOPPED)) {
-                    retval = 0;
-                } else if (ts0710->dlci[dlci].state ==
-                       REJECTED) {
-                    MUX_DBG(6,"MUX DLCI:%d Send SABM got rejected!\n",dlci);
-                    retval = -EREJECTED;
-                } else if (signal_pending(current)) {
-                    MUX_DBG(6,"MUX DLCI:%d Send SABM got signal!\n",dlci);
-                    retval = -EAGAIN;
-                }
-            }
-
-            if ((ts0710->dlci[dlci].state == NEGOTIATING)
-                || (ts0710->dlci[dlci].state == CONNECTING)) {
-                ts0710->dlci[dlci].state = DISCONNECTED;
-            }
-            wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
-        }
-    }
-    return retval;
-}
-
-/*--------------------------------------------------------------------*/
-/* END MUX General code                                               */
-/*--------------------------------------------------------------------*/
-
-
-/*--------------------------------------------------------------------*/
-/* MUX TX code                                                        */
-/*--------------------------------------------------------------------*/
-
-static void mux_tx_queues_init(void)
-{
-    int                 i;
-
-    mux_pool_init( &frames_pool,
-                   frame_node,
-                   MAX_WAITING_FRAMES_OVER );
-
-    frame_usage = 0;
-
-    for (i=0; i < TS0710MAX_PRIORITY_NUMBER; i++)
-    {
-        mux_queue_init( &mux_tx_q[i],
-                        NULL,
-                        0,
-                        NULL,
-                        0,
-                        NULL );
-
-        mux_queue_pool_set( &mux_tx_q[i], &frames_pool);
-    }
-}
-
-
-static bool mux_tx_queue_search_cb(struct mux_queue_struct *q, struct mux_frame_struct *node)
-{
-    if(ts0710_connection.dlci[node->dlci].state != FLOW_STOPPED)
-        return true;
-
-    return false;
-}
-
-static void mux_tx_handle_work(struct work_struct *work)
-{
-    struct mux_frame_struct     *frame;
-    dlci_struct                     *dlci_data;
-    u8                              *data_ptr;
-    int                             data_size = 1; //just to pass first cycle in the main loop
-    int                             dlci;
-    int                             i;
-
-
-#ifdef MSPI2MSPI_TEST
-    if(mspitest_enable == true)
-    {
-        if(mspitest_tx_enable == true)
-        {
-            mspi_data = (u8 *)kmalloc(mspitest_frame_size, GFP_KERNEL | __GFP_ZERO);
-            data_ptr = mspi_data;
-            data_size = mspitest_frame_size;
-            if((data_size > 0) && (data_ptr != NULL))
-            {
-                while(1)
-                {
-                    set_bit(TTY_DO_WRITE_WAKEUP, &ipc_tty->flags);
-                    while(data_size != ipc_tty->ops->write(ipc_tty, data_ptr, data_size))
-                    {
-                        down(&ipc_write_completion);
-                        set_bit(TTY_DO_WRITE_WAKEUP, &ipc_tty->flags);
-                    }
-                    spin_lock_bh(&mspi2mspi_lock);
-                    mspi2mspi_tx_counter += data_size;
-                    spin_unlock_bh(&mspi2mspi_lock);
-                    yield();
-                }
-            }
-        }
-        else
-        {
-            return;
-        }
-    }
-#endif//MSPI2MSPI_TEST
-
-
-    while( (data_size != 0) &&
-             (ts_ldisc_called == 0) &&
-             (frame_usage > 0) )
-    {
-        data_ptr = NULL;
-        data_size = 0;
-        dlci = 0;
-
-        for(i = 0; i < TS0710MAX_PRIORITY_NUMBER ; i++)
-        {
-            if(all_flow_off_from_modem && (i > 0))
-            {
-                MUX_DBG(6,"mux_tx_looper flow off - returns\n");
-                return;
-            }
-
-            frame = mux_queue_search(&mux_tx_q[i], mux_tx_queue_search_cb);
-
-            if(frame != NULL)
-            {
-                data_ptr = frame->data;
-                data_size = frame->size;
-                dlci = frame->dlci;
-
-                MUX_TRACE("found data %p sz %d dlci %d", data_ptr, data_size, dlci);
-
-                dlci_data = &ts0710_connection.dlci[dlci];
-
-                dlci_data->tx.chars_in_buffer -= data_size;
-
-                mux_queue_free(&mux_tx_q[i], frame);
-
-                spin_lock_bh(&tx_lock);
-                frame_usage--;
-
-                if(dlci_data->tx.frame_count > 0)
-                    dlci_data->tx.frame_count--;
-
-                if((dlci_data->tx.wakeup_flag == 1) && (dlci_data->tx.frame_count < LO_WM_MUX_TX) && (mux_table[dlci] != NULL))
-                {
-                    dlci_data->tx.wakeup_flag = 0;
-                    MUX_DBG(8,"tty_wakeup on %d\n",dlci);
-                    spin_unlock_bh(&tx_lock);
-                    wake_up_interruptible_poll(&(mux_table[dlci]->write_wait), POLLOUT);
-                    break;
-                }
-                spin_unlock_bh(&tx_lock);
-                break;
-            }
-        }
-
-        if((data_size > 0) && (data_ptr != NULL))
-        {
-            set_bit(TTY_DO_WRITE_WAKEUP, &ipc_tty->flags);
-            while((ts_ldisc_called == 0) && (data_size != ipc_tty->ops->write(ipc_tty, data_ptr, data_size)))
-            {
-                if((dlci_data->tx.wakeup_flag == 1) && (mux_table[dlci] != NULL))
-                {
-                    dlci_data->tx.wakeup_flag = 0;
-                    MUX_DBG(8,"tty_wakeup on %d\n",dlci);
-                    wake_up_interruptible_poll(&(mux_table[dlci]->write_wait), POLLOUT);
-                }
-                down_interruptible(&ipc_write_completion);
-                set_bit(TTY_DO_WRITE_WAKEUP, &ipc_tty->flags);
-            }
-
-            kfree(data_ptr);
-        }
-
-    } 
-}
-
-static int mux_tx_put_to_send(int dlci, u8 *data, int size)
-{
-    dlci_struct                     *dlci_data = &ts0710_connection.dlci[dlci];
-    int                             priority = dlci_data->priority;
-    struct mux_queue_struct         *queue = &mux_tx_q[priority];
-    struct mux_frame_struct         *node = NULL;
-    int                             retval = 0;
-
-    spin_lock_bh(&tx_lock);
-    if( ((dlci == 0) && (frame_usage < MAX_WAITING_FRAMES_OVER)) ||
-        ((dlci > 0)  && (frame_usage < MAX_WAITING_FRAMES) && (dlci_data->tx.frame_count < HI_WM_MUX_TX)))
-    {
-        node = mux_queue_alloc(queue);
-        if (node != NULL)
-        {
-            dlci_data->tx.frame_count++;
-            frame_usage++;
-            MUX_DBG(8,"frame_usage = %d\n",frame_usage);
-            spin_unlock_bh(&tx_lock);
-
-            node->data = data;
-            node->size = size;
-            node->dlci = dlci;
-
-            retval = size;
-
-            MUX_TRACE("enqueue send data %p sz %d dlci %d", data, size, dlci);
-            mux_queue_enqueue(queue, node);
-
-            dlci_data->tx.chars_in_buffer += size;
-        }
-    }
-
-    if(node == NULL)
-    {
-        spin_unlock_bh(&tx_lock);
-        MUX_DBG(7,"ERROR: NOMEM node = %p\n", node);
-        kfree(data);
-        retval = -ENOMEM;
-    }
-    else
-    {
-        queue_work(mux_tx_wq, &mux_tx_work);
-    }
-
-    return retval;
+	u8 gen_reg;
+    
+	gen_reg = ~0;
+	while (len--)
+		gen_reg = fcs_table[gen_reg ^ *(payload++)];
+    
+	return ~gen_reg;
 }
 
 /* See TS 07.10's Section 5.2.1 */
-static int mux_tx_send_frame(u8 dlci, int initiator, enum mux_frametype frametype, const u8 data[], int len)
+static int mux_send_frame(u8 dlci, int initiator,
+                          enum mux_frametype frametype, const u8 data[], int len)
 {
-
-    int pos = 0;
-    int pf, crc_len, res;
-    int cr = initiator & 0x1;
-    u_int8_t fcs;
-    u8 *framebuf = kmalloc(MAX_FRAME_SIZE, GFP_ATOMIC);
-
-    if (framebuf == NULL)
-    {
-        MUX_ERR("Alloc Failed \n");
-        return -1;
-    }
-
-    /* FIXME: bitmask? */
-    switch (frametype) {
+	int pos = 0;
+	int pf, crc_len, res;
+	int cr = initiator & 0x1;
+	u_int8_t fcs;
+    
+	u8 *framebuf = kmalloc(2048, GFP_ATOMIC);
+    
+	if (!framebuf) {
+		printk(KERN_ERR "mux_send_frame:: Alloc Failed \n");
+		return -ENOMEM;
+	}
+    
+	/* FIXME: bitmask? */
+	switch (frametype) {
         case MUX_UIH:
         case ACK:
             pf = 0;
@@ -1493,1301 +421,1579 @@ static int mux_tx_send_frame(u8 dlci, int initiator, enum mux_frametype frametyp
         default:
             pf = 1;
             crc_len = 0;
-    }
-
-    framebuf[pos++] = MUX_BASIC_FLAG_SEQ;
-
-    /* Address field.  */
-    framebuf[pos++] = MUX_EA | (cr << 1) | (dlci << 2);
-
-    /* Control field.  */
-    framebuf[pos++] = frametype | (pf << 4);
-
-    if (len & ~0x7f) {
-        framebuf[pos ++] = 0 | ((len & 0x7f) << 1);
-        framebuf[pos ++] = len >> 7;
-    } else
-        framebuf[pos ++] = 1 | (len << 1);
-
-    /* Information field.  */
-    if (len > 0)
-    {
-        memcpy(&framebuf[pos], data, len);
-        pos += len;
-    }
-
-    fcs = mux_fcs_compute(framebuf + 1, (pos - 1 - crc_len));
-
-    framebuf[pos++] = fcs;
-
-    framebuf[pos ++] = MUX_BASIC_FLAG_SEQ;
-
-    MUX_TRACE("put to send buf %p sz %d dlci %d", framebuf, pos, dlci);
-    res = mux_tx_put_to_send( dlci, framebuf, pos);
-
-    if(res == -ENOMEM){
-      return res;
-    }
-
-    if (res != pos) {
-        MUX_DBG(3,"mux_send_frame error %d\n", res);
-        return -1;
-    }
-
-    /* Function should return number of sent information bytes.
-    Therefore need to decrease ret variable */
-    if (len & ~0x7f) {
-        /* Length indicator have two octet size. */
-        res -= 7;
-    } else {
-        res -= 6;
-    }
-
-    return res;
-}
-static int mux_tx_uih_data(ts0710_con * ts0710, u8 dlci, u8 *data, int len)
-{
-    int ret =0;
-    if (len > 0)
-    {
-        ret = mux_tx_send_frame(dlci, ts0710->initiator, MUX_UIH, data, len);
-    }
-    return ret;
-}
-/*--------------------------------------------------------------------*/
-/* END MUX TX code                                                    */
-/*--------------------------------------------------------------------*/
-
-
-/*--------------------------------------------------------------------*/
-/* MUX RX code                                                        */
-/*--------------------------------------------------------------------*/
-
-static void mux_rx_queue_hiwater_cb(struct mux_queue_struct *q)
-{
-    dlci_struct                 *dlci_data = (dlci_struct*)q->user_data;
-
-    ts0710_flow_off(dlci_data->dlci, &ts0710_connection);
-}
-
-static void mux_rx_queue_lowater_cb(struct mux_queue_struct *q)
-{
-    dlci_struct                 *dlci_data = (dlci_struct*)q->user_data;
-
-    ts0710_flow_on(dlci_data->dlci, &ts0710_connection);
-}
-
-
-static bool mux_rx_queue_flush_cb(struct mux_queue_struct *q, struct mux_frame_struct *node)
-{
-    kfree(node->data);
-
-    return true;
-}
-static void mux_rx_flush_queue(int dlci)
-{
-    struct mux_queue_struct     *queue = &mux_rx_q[dlci];
-    dlci_struct                 *dlci_data = (dlci_struct*)queue->user_data;
-
-    if(dlci_data && dlci_data->rx.workqueue != NULL)
-    {
-        mux_queue_flush(queue, mux_rx_queue_flush_cb);
-
-        dlci_data->rx.flow_disabled = false;
-        flush_workqueue(dlci_data->rx.workqueue);
-    }
-}
-
-static void mux_rx_destroy_queue(int dlci)
-{
-    dlci_struct                 *dlci_data = (dlci_struct*)mux_rx_q[dlci].user_data;
-
-    if(dlci_data && dlci_data->rx.workqueue != NULL)
-    {
-        destroy_workqueue(dlci_data->rx.workqueue);
-        dlci_data->rx.workqueue = NULL;
-    }
-}
-
-static void mux_rx_uih(ts0710_con * ts0710, u8 *payload, int payload_len, int dlci)
-{
-    struct tty_struct *tty  = NULL;
-    dlci_struct             *dlci_data = &ts0710->dlci[dlci];
-
-    if ((dlci_data->state != CONNECTED)
-            && (dlci_data->state != FLOW_STOPPED))
-    {
-        MUX_ERR("MUX Error: DLCI %d not connected, discard it!\n", dlci);
-        send_dm(ts0710, dlci);
-        return;
-    }
-
-    MUX_DBG(7,"UIH on channel %d\n", dlci);
-
-    if (payload_len > dlci_data->mtu)
-    {
-        MUX_ERR("MUX Error:  DLCI:%d, uih_len:%d is bigger than mtu:%d, discard data!\n",
-                dlci, payload_len, dlci_data->mtu);
-        return;
-    }
-
-    tty = mux_table[dlci];
-    if ((!mux_tty[dlci]) || (!tty)) {
-        return;
-    }
-
-#ifdef USE_TTY_INSERT
-    // Ensure that tty does have enough space to receive packet, otherwise wait for unthrottle
-    while(tty_buffer_request_room(tty, payload_len) < payload_len)
-    {
-        MUX_DBG(9, "not enough receive room on dlci %d", dlci);
-        set_bit(TTY_THROTTLED, &tty->flags);
-        while(down_interruptible(&dlci_data->rx.rx_completion) != 0) {};
-    }
-
-    tty_insert_flip_string(tty, payload, payload_len);
-    tty_flip_buffer_push(tty);
-
-#else
-   
-    tty->ldisc->ops->receive_buf(tty, payload, NULL, payload_len);
-
-#endif
+	}
     
+	/* if (dlc->muxer->option == mux_option_basic) */
+	framebuf[pos++] = MUX_BASIC_FLAG_SEQ;
+	/* else
+	 * framebuf[pos++] = MUX_ADVANCED_FLAG_SEQ; */
+    
+	/* Address field.  */
+	framebuf[pos++] = MUX_EA | (cr << 1) | (dlci << 2);
+    
+	/* Control field.  */
+	framebuf[pos++] = frametype | (pf << 4);
+    
+	/* Length indicator.  */
+	/* if (dlc->muxer->option == mux_option_basic) { */
+	if (len & ~0x7f) {
+		framebuf[pos++] = 0 | ((len & 0x7f) << 1);
+		framebuf[pos++] = len >> 7;
+	} else {
+		framebuf[pos++] = 1 | (len << 1);
+	}
+	/* } */
+    
+	/* Information field.  */
+	if (len)
+		memcpy(&framebuf[pos], data, len);
+	pos += len;
+    
+	fcs = mux_fcs_compute(framebuf + 1, (pos - 1 - crc_len));
+	framebuf[pos++] = fcs;
+    
+	/*if (dlc->muxer->option == mux_option_advanced)
+	 * pos = mux_frame_escape(framebuf + 1, pos - 1) + 1;
+	 *
+	 * if (dlc->muxer->option == mux_option_basic) */
+	framebuf[pos++] = MUX_BASIC_FLAG_SEQ;
+	/* else
+	 * framebuf[pos ++] = MUX_ADVANCED_FLAG_SEQ; */
+	res = node_put_to_send(dlci, framebuf, pos);
+	if (res == -ENOMEM)
+		return res;
+    
+	if (res != pos) {
+		TS0710_PRINTK("mux_send_frame error %d\n", res);
+		return -1;
+	}
+    
+	/* Function should return number of sent information bytes.
+	 * Therefore need to decrease ret variable */
+	if (len & ~0x7f)
+    /* Length indicator have two octet size. */
+		res -= 7;
+	else
+		res -= 6;
+    
+	return res;
 }
 
-static void ts0710_recv_data_server(ts0710_con * ts0710, short_frame *short_pkt)
-{
-    u8 be_connecting;
+/* Creates a UA packet and puts it at the beginning of the pkt pointer */
 
-    switch (CLR_PF(short_pkt->h.control))
-    {
+static void send_ua(ts0710_con *ts0710, u8 dlci)
+{
+	mux_send_frame(dlci, !ts0710->initiator, MUX_UA, 0, 0);
+}
+
+/* Creates a DM packet and puts it at the beginning of the pkt pointer */
+
+static void send_dm(ts0710_con *ts0710, u8 dlci)
+{
+	mux_send_frame(dlci, !ts0710->initiator, MUX_DM, 0, 0);
+}
+
+static void send_sabm(ts0710_con *ts0710, u8 dlci)
+{
+	mux_send_frame(dlci, ts0710->initiator, MUX_SABM, 0, 0);
+}
+
+/* Multiplexer command packets functions */
+
+/* Turns on the ts0710 flow control */
+
+static void ts0710_fcon_msg(ts0710_con *ts0710, u8 cr)
+{
+	mux_send_uih(ts0710, cr, FCON, 0, 0);
+}
+
+/* Turns off the ts0710 flow control */
+
+static void ts0710_fcoff_msg(ts0710_con *ts0710, u8 cr)
+{
+	mux_send_uih(ts0710, cr, FCOFF, 0, 0);
+}
+
+
+/* Sends an PN-messages and sets the not negotiable parameters to their
+ * default values in ts0710 */
+static void send_pn_msg(ts0710_con *ts0710, u8 prior, u32 frame_size,
+                        u8 credit_flow, u8 credits, u8 dlci, u8 cr)
+{
+	u8 data[8];
+	pn_t *send = (pn_t *)data;
+    
+	send->res1 = 0;
+	send->res2 = 0;
+	send->dlci = dlci;
+	send->frame_type = 0;
+	send->credit_flow = credit_flow;
+	send->prior = prior;
+	send->ack_timer = 0;
+    
+	send->frame_sizel = frame_size & 0xFF;
+	send->frame_sizeh = frame_size >> 8;
+    
+	send->credits = credits;
+	send->max_nbrof_retrans = 0;
+    
+	mux_send_uih(ts0710, cr, PN, data, 8);
+}
+
+/* Send a Not supported command - command, which needs 3 bytes */
+
+static void send_nsc_msg(ts0710_con *ts0710, mcc_type cmd, u8 cr)
+{
+	mux_send_uih(ts0710, cr, NSC, (u8 *)&cmd, 1);
+}
+
+static void mux_send_uih(ts0710_con *ts0710, u8 cr, u8 type, u8 *data, int len)
+{
+	u8 *send = kmalloc(len + 2, GFP_ATOMIC);
+    
+    //WBT #196219
+	mcc_short_frame_head *head;
+    
+	if (send == NULL) {
+		TS0710_PRINTK("Memory Allocation fail\n");
+		return;
+	}
+	head = (mcc_short_frame_head *)send;
+	head->type.ea = 1;
+	head->type.cr = cr;
+	head->type.type = type;
+	head->length.ea = 1;
+	head->length.len = len;
+    
+	if (len)
+		memcpy(send + 2, data, len);
+    
+	mux_send_frame(CTRL_CHAN, ts0710->initiator, MUX_UIH, send, len + 2);
+    
+	kfree(send);
+}
+
+static int mux_send_uih_data(ts0710_con *ts0710, u8 dlci, u8 *data, int len)
+{
+	int ret = 0;
+    
+	u8 *send = NULL;
+	if (len) {
+		ret = mux_send_frame(dlci, ts0710->initiator, MUX_UIH, data, len);
+	}
+	return ret;
+}
+
+static int ts0710_msc_msg(ts0710_con *ts0710, u8 value, u8 cr, u8 dlci)
+{
+	u8 buf[2];
+	msc_t *send = (msc_t *)buf;
+    
+	send->dlci.ea = 1;
+	send->dlci.cr = 1;
+	send->dlci.d = dlci & 1;
+	send->dlci.server_chn = (dlci >> 1) & 0x1f;
+    
+	send->v24_sigs = value;
+    
+	mux_send_uih(ts0710, cr, MSC, buf, 2);
+    
+	return 0;
+}
+
+/* Parses a multiplexer control channel packet */
+
+void process_mcc(u8 *data, u32 len, ts0710_con *ts0710, int longpkt)
+{
+	mcc_short_frame *mcc_short_pkt;
+	int j;
+	int flow_on_sema_status = 0;
+    
+	if (longpkt)
+		mcc_short_pkt = (mcc_short_frame *)(((long_frame *)data)->data);
+	else
+		mcc_short_pkt = (mcc_short_frame *)(((short_frame *)data)->data);
+    
+    
+	switch (mcc_short_pkt->h.type.type) {
+        case FCON:      /*Flow control on command */
+            TS0710_PRINTK("MUX Received Flow control(all channels) on command\n");
+            if (mcc_short_pkt->h.type.cr == MCC_CMD) {
+                for (j = 0; j < TS0710_MAX_CHN; j++) {
+                    ts0710->dlci[j].state = CONNECTED;
+                    up(&spi_write_data_sema[j]);
+                    flow_on_sema_status = down_trylock(&spi_write_data_sema[j]);
+                }
+                ts0710_fcon_msg(ts0710, MCC_RSP);
+            }
+            break;
+            
+        case FCOFF:             /*Flow control off command */
+            TS0710_PRINTK("MUX Received Flow control(all channels) off command\n");
+            if (mcc_short_pkt->h.type.cr == MCC_CMD) {
+                for (j = 0; j < TS0710_MAX_CHN; j++)
+                    ts0710->dlci[j].state = FLOW_STOPPED;
+                ts0710_fcoff_msg(ts0710, MCC_RSP);
+            }
+            break;
+            
+        case MSC:       /*Modem status command */
+        {
+            u8 dlci;
+            u8 v24_sigs;
+            
+            dlci = (mcc_short_pkt->value[0]) >> 2;
+            v24_sigs = mcc_short_pkt->value[1];
+            
+            if (mcc_short_pkt->h.type.cr == MCC_CMD) {
+                TS0710_DEBUG("Received Modem status command\n");
+                if ((v24_sigs & 2) && (ts0710->dlci[dlci].state == CONNECTED)) {
+                    TS0710_LOG("MUX Received Flow off on dlci %d\n", dlci);
+                    ts0710->dlci[dlci].state = FLOW_STOPPED;
+                } else if (MUX_STOPPED(ts0710, dlci)) {
+                    ts0710->dlci[dlci].state = CONNECTED;
+                    TS0710_LOG("MUX Received Flow on on dlci %d\n", dlci);
+                    up(&spi_write_data_sema[dlci]);
+                    flow_on_sema_status = down_trylock(&spi_write_data_sema[dlci]);
+                }
+                
+                ts0710_msc_msg(ts0710, v24_sigs, MCC_RSP, dlci);
+            } else {
+                TS0710_DEBUG("Received Modem status response\n");
+                
+                if (v24_sigs & 2)
+                    TS0710_DEBUG("Flow stop accepted\n");
+            }
+            break;
+        }
+            
+        case PN:        /*DLC parameter negotiation */
+        {
+            u8 dlci;
+            u16 frame_size;
+            pn_msg *pn_pkt;
+            
+            pn_pkt = (pn_msg *)data;
+            dlci = pn_pkt->dlci;
+            frame_size = GET_PN_MSG_FRAME_SIZE(pn_pkt);
+            TS0710_DEBUG("Received DLC parameter negotiation, PN\n");
+            
+            if (pn_pkt->mcc_s_head.type.cr == MCC_CMD) {
+                TS0710_DEBUG("received PN command with:\n");
+                TS0710_DEBUG("Frame size:%d\n", frame_size);
+                
+                frame_size = min(frame_size, ts0710->dlci[dlci].mtu);
+                send_pn_msg(ts0710, pn_pkt->prior, frame_size, 0, 0, dlci, MCC_RSP);
+                ts0710->dlci[dlci].mtu = frame_size;
+                TS0710_DEBUG("process_mcc : mtu set to %d\n", ts0710->dlci[dlci].mtu);
+            } else {
+                TS0710_DEBUG("received PN response with:\n");
+                TS0710_DEBUG("Frame size:%d\n", frame_size);
+                
+                frame_size = min(frame_size, ts0710->dlci[dlci].mtu);
+                ts0710->dlci[dlci].mtu = frame_size;
+                
+                
+                if (ts0710->dlci[dlci].state == NEGOTIATING) {
+                    ts0710->dlci[dlci].state = CONNECTING;
+                    wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
+                }
+            }
+            break;
+        }
+            
+        case NSC:       /*Non supported command resonse */
+            TS0710_LOG("MUX Received Non supported command response\n");
+            break;
+            
+        default:        /*Non supported command received */
+            TS0710_LOG("MUX Received a non supported command\n");
+            send_nsc_msg(ts0710, mcc_short_pkt->h.type, MCC_RSP);
+            break;
+	}
+}
+
+static void free_mux_recv_struct(mux_recv_struct *recv_info)
+{
+	if (!recv_info)
+		return;
+    
+	kfree(recv_info);
+}
+
+static inline void add_post_recv_queue(mux_recv_struct **	head,
+                                       mux_recv_struct *	new_item)
+{
+	new_item->next = *head;
+	*head = new_item;
+}
+
+static void ts0710_flow_on(u8 dlci, ts0710_con *ts0710)
+{
+	if (!((ts0710->dlci[0].state) & (CONNECTED | FLOW_STOPPED)))
+		return;
+    
+	if (!((ts0710->dlci[dlci].state) & (CONNECTED | FLOW_STOPPED)))
+		return;
+    
+	if (!(ts0710->dlci[dlci].flow_control))
+		return;
+    
+	ts0710_msc_msg(ts0710, EA | RTC | RTR | DV, MCC_CMD, dlci);
+    
+	ts0710->dlci[dlci].flow_control = 0;
+}
+
+void ts0710_recv_data_server(ts0710_con *ts0710, short_frame *short_pkt, int len)
+{
+	u8 be_connecting;
+	u8 *uih_data_start;
+	u32 uih_len;
+	long_frame *long_pkt;
+    
+	switch (CLR_PF(short_pkt->h.control)) {
         case SABM:
-            MUX_DBG(7,"SABM-packet received\n");
+            TS0710_DEBUG("SABM-packet received\n");
+            TS0710_DEBUG("server channel == 0\n");
             ts0710->dlci[0].state = CONNECTED;
+            
+            TS0710_DEBUG("sending back UA - control channel\n");
             send_ua(ts0710, 0);
             wake_up_interruptible(&ts0710->dlci[0].open_wait);
+            
             break;
-
         case UA:
-            MUX_DBG(7,"UA packet received\n");
+            TS0710_DEBUG("UA packet received\n");
+            
+            TS0710_DEBUG("server channel == 0\n");
+            
             if (ts0710->dlci[0].state == CONNECTING) {
                 ts0710->dlci[0].state = CONNECTED;
                 wake_up_interruptible(&ts0710->dlci[0].
-                                  open_wait);
+                                      open_wait);
             } else if (ts0710->dlci[0].state == DISCONNECTING) {
                 ts0710_upon_disconnect();
             } else {
-                MUX_DBG(7," Something wrong receiving UA packet\n");
+                TS0710_DEBUG(" Something wrong receiving UA packet\n");
             }
+            
             break;
-
         case DM:
-            MUX_DBG(7,"DM packet received\n");
-            if (ts0710->dlci[0].state == CONNECTING) {
+            TS0710_DEBUG("DM packet received\n");
+            TS0710_DEBUG("server channel == 0\n");
+            
+            if (ts0710->dlci[0].state == CONNECTING)
                 be_connecting = 1;
-            } else {
+            else
                 be_connecting = 0;
-            }
             ts0710_upon_disconnect();
-            if (be_connecting) {
+            if (be_connecting)
                 ts0710->dlci[0].state = REJECTED;
-            }
+            
             break;
-
         case DISC:
-            MUX_DBG(7,"DISC packet received\n");
+            TS0710_DEBUG("DISC packet received\n");
+            
+            TS0710_DEBUG("server channel == 0\n");
+            
             send_ua(ts0710, 0);
+            TS0710_DEBUG("DISC, sending back UA\n");
+            
             ts0710_upon_disconnect();
+            
             break;
-
+            
         case UIH:
-            MUX_DBG(7,"UIH packet received\n");
-
+            TS0710_DEBUG("UIH packet received\n");
+            
             if (GET_PF(short_pkt->h.control)) {
-                MUX_ERR("MUX Error: UIH packet with P/F set, discard it!\n");
+                TS0710_LOG("MUX Error %s: UIH packet with P/F set, discard it!\n",
+                           __FUNCTION__);
                 break;
             }
-
-            process_mcc((u8 *)short_pkt, ts0710,
-                    !(short_pkt->h.length.ea));
+            
+            /* FIXME: connected and flow */
+            
+            if ((short_pkt->h.length.ea) == 0) {
+                TS0710_DEBUG("Long UIH packet received\n");
+                long_pkt = (long_frame *)short_pkt;
+                uih_len = GET_LONG_LENGTH(long_pkt->h.length);
+                uih_data_start = long_pkt->h.data;
+                TS0710_DEBUG("long packet length %d\n", uih_len);
+            } else {
+                TS0710_DEBUG("Short UIH pkt received\n");
+                uih_len = short_pkt->h.length.len;
+                uih_data_start = short_pkt->data;
+            }
+            TS0710_DEBUG("UIH on serv_channel 0\n");
+            process_mcc((u8 *)short_pkt, len, ts0710,
+                        !(short_pkt->h.length.ea));
+            
             break;
-
+            
         default:
-            MUX_ERR("Received illegal packet on channel 0\n");
+            TS0710_DEBUG("illegal packet\n");
             break;
-    }
-
+	}
 }
 
-static void ts0710_recv_data(ts0710_con * ts0710, short_frame *short_pkt, int payload_len, int dlci)
+void process_uih(ts0710_con *ts0710, char *data, int len, u8 dlci)
 {
-    u8                  *payload_start;
+	short_frame *short_pkt = (short_frame *)data;
+	long_frame *long_pkt;
+	u8 *uih_data_start;
+	u32 uih_len;
+    
+	u8 tty_idx;
+	struct tty_struct *tty;
+	u8 flow_control;
+	mux_recv_struct *recv_info;
+	int recv_room;
+    
+    
+	if ((ts0710->dlci[dlci].state != CONNECTED)
+	    && (ts0710->dlci[dlci].state != FLOW_STOPPED)) {
+		TS0710_LOG("MUX Error %s: DLCI %d not connected, discard it!\n",
+                   __FUNCTION__, dlci);
+		send_dm(ts0710, dlci);
+		return;
+	}
+    
+	if ((short_pkt->h.length.ea) == 0) {
+		TS0710_DEBUG("Long UIH packet received\n");
+		long_pkt = (long_frame *)data;
+		uih_len = GET_LONG_LENGTH(long_pkt->h.length);
+		uih_data_start = long_pkt->h.data;
+		TS0710_DEBUG("long packet length %d\n", uih_len);
+	} else {
+		TS0710_DEBUG("Short UIH pkt received\n");
+		uih_len = short_pkt->h.length.len;
+		uih_data_start = short_pkt->data;
+	}
+    
+	TS0710_DEBUG("UIH on channel %d uih_len %d \n", dlci, uih_len);
+    
+	if (uih_len > ts0710->dlci[dlci].mtu) {
+		TS0710_PRINTK
+		(
+         "MUX Error:  DLCI:%d, uih_len:%d is bigger than mtu:%d, discard data!\n",
+         dlci, uih_len, ts0710->dlci[dlci].mtu);
+		return;
+	}
+    
+	tty_idx = dlci;
+	tty = mux_table[tty_idx];
+	if ((!mux_tty[tty_idx]) || (!tty)) {
+		TS0710_PRINTK
+        ("MUX: No application waiting for, discard it! /dev/mux%d\n",
+         tty_idx);
+		return;
+	}
+    
+	if ((!mux_recv_info_flags[tty_idx])
+	    || (!mux_recv_info[tty_idx])) {
+		TS0710_PRINTK
+        ("MUX Error: No mux_recv_info, discard it! /dev/mux%d\n",
+         tty_idx);
+		return;
+	}
+    
+	recv_info = mux_recv_info[tty_idx];
+	if (recv_info->total > 8192) {
+		TS0710_PRINTK
+        ("MUX : discard data for tty_idx:%d, recv_info->total > 8192 \n",
+         tty_idx);
+		return;
+	}
+    
+	flow_control = 0;
+	recv_room = 65535;
+    
+	if (tty->receive_room)
+		recv_room = tty->receive_room;
+    
+	if ((recv_room - (uih_len + recv_info->total)) <
+	    ts0710->dlci[dlci].mtu) {
+		TS0710_DEBUG(
+                     "Flow OFF dlci=%d, tty->receive_room=%d uih_len=%d mtu=%d recv_info->total=%d\n",
+                     dlci, tty->receive_room, uih_len, ts0710->dlci[dlci].mtu,
+                     recv_info->total);
+		flow_control = 1;
+	}
+	tty->ldisc->ops->receive_buf(tty, uih_data_start, NULL, uih_len);
+	if (flow_control)
+        //      ts0710_flow_off(tty, dlci, ts0710);
+		tty_throttle(tty);
+}
 
-    if (dlci == 0)
-        return ts0710_recv_data_server(ts0710, short_pkt);
 
-    switch (CLR_PF(short_pkt->h.control))
-    {
+void ts0710_cp_emergency_state(void)
+{
+	u8 tty_idx = 1;
+	struct tty_struct *tty;
+	u8 uih_data_start[] =
+	{ 0x0d, 0x0a, 0x2b, 0x43, 0x47, 0x52, 0x45, 0x47, 0x3a, 0x20, 0x39, 0x0d, 0x0a };
+    
+	tty = mux_table[tty_idx];
+	if (tty != NULL)
+		tty->ldisc->ops->receive_buf(tty, uih_data_start, NULL, sizeof(uih_data_start));
+}
+EXPORT_SYMBOL_GPL(ts0710_cp_emergency_state);
+
+
+#ifdef LGE_FEATURE_CP_RESET_RECOVERY
+void ts0710_CPState_to_GPS(void)
+{
+#ifndef CONFIG_STARTABLET_XMM6160
+	u8 tty_idx = 9;
+	struct tty_struct *tty = mux_table[tty_idx];
+	u8 uih_data_start[] =
+	{ 0x0d,	     0x0a,	0x24,	   0x4D,       0x44, 0x4D, 0x53, 0x54, 0x41, 0x54, 0x45,
+        0x3a,
+        0x20,
+        0x39,
+        0x0d, 0x0a };                                                                                                         //$MDMSTATE: 9
+#else
+	u8 tty_idx = 17;
+	struct tty_struct *tty = mux_table[tty_idx];
+	u8 uih_data_start[] =
+	{ 0x0d,	     0x0a,	0x2B,	   0x58,       0x4D, 0x4D, 0x53, 0x54, 0x41, 0x54, 0x45,
+        0x3a,
+        0x20,
+        0x39,
+        0x0d, 0x0a };                                                                                                         //$MDMSTATE: 9
+#endif
+    
+	if (tty != NULL)
+		tty->ldisc->ops->receive_buf(tty, uih_data_start, NULL, sizeof(uih_data_start));
+	else
+		TS0710_DEBUG("ts0710_CPState_to_GPS tty == NULL \n");
+}
+EXPORT_SYMBOL_GPL(ts0710_CPState_to_GPS);
+#endif //LGE_FEATURE_CP_RESET_RECOVERY
+
+void ts0710_recv_data(ts0710_con *ts0710, char *data, int len)
+{
+	short_frame *short_pkt;
+	u8 dlci;
+    
+	short_pkt = (short_frame *)data;
+    
+	dlci = short_pkt->h.addr.server_chn << 1 | short_pkt->h.addr.d;
+	if (!dlci)
+		return ts0710_recv_data_server(ts0710, short_pkt, len);
+    
+	switch (CLR_PF(short_pkt->h.control)) {
         case SABM:
-            MUX_DBG(7,"Incoming connect on channel %d\n", dlci);
+            TS0710_PRINTK("Incomming connect on channel %d\n", dlci);
+            
             send_ua(ts0710, dlci);
+            
             ts0710->dlci[dlci].state = CONNECTED;
             wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
+            
             break;
-
         case UA:
-            MUX_DBG(7,"Incoming UA on channel %d\n", dlci);
+            TS0710_DEBUG("Incomming UA on channel %d\n", dlci);
+            
             if (ts0710->dlci[dlci].state == CONNECTING) {
                 ts0710->dlci[dlci].state = CONNECTED;
-                wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
+                wake_up_interruptible(&ts0710->dlci[dlci].
+                                      open_wait);
             } else if (ts0710->dlci[dlci].state == DISCONNECTING) {
                 ts0710->dlci[dlci].state = DISCONNECTED;
-                wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
-                wake_up_interruptible(&ts0710->dlci[dlci].close_wait);
+                wake_up_interruptible(&ts0710->dlci[dlci].
+                                      open_wait);
+                wake_up_interruptible(&ts0710->dlci[dlci].
+                                      close_wait);
                 ts0710_reset_dlci(dlci);
             }
+            
             break;
-
         case DM:
-            MUX_DBG(7,"Incoming DM on channel %d\n", dlci);
+            TS0710_DEBUG("Incomming DM on channel %d\n", dlci);
+            
             if (ts0710->dlci[dlci].state == CONNECTING)
                 ts0710->dlci[dlci].state = REJECTED;
             else
                 ts0710->dlci[dlci].state = DISCONNECTED;
-
+            
             wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
             wake_up_interruptible(&ts0710->dlci[dlci].close_wait);
             ts0710_reset_dlci(dlci);
+            
+            
             break;
-
         case DISC:
-            MUX_DBG(7,"Incoming DISC on channel %d\n", dlci);
             send_ua(ts0710, dlci);
+            
             ts0710->dlci[dlci].state = DISCONNECTED;
-            if(waitqueue_active(&ts0710->dlci[dlci].open_wait))
-                wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
-            if(waitqueue_active(&ts0710->dlci[dlci].close_wait))
-                wake_up_interruptible(&ts0710->dlci[dlci].close_wait);
+            wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
+            wake_up_interruptible(&ts0710->dlci[dlci].close_wait);
             ts0710_reset_dlci(dlci);
+            
             break;
-
-    case UIH:
-            if(short_pkt->h.length.ea == 1)
-            {
-                payload_start = short_pkt->data;
-            }
-            else
-            {
-                long_frame *long_pkt = (long_frame*)short_pkt;
-                payload_start = long_pkt->data;
-            }
-            mux_rx_uih(ts0710, payload_start, payload_len, dlci);
+        case UIH:
+            process_uih(ts0710, data, len, dlci);
+            
             break;
-
         default:
-            MUX_ERR("Received invalid packet on channel %d\n",dlci);
+            TS0710_PRINTK("illegal packet\n");
+            printk("\n TS0710:ts0710_recv_data:illegal packet for DLCi %d, hdr=%x \n", dlci,
+                   CLR_PF(
+                          short_pkt->h.control));
             break;
-    }
+	}
 }
 
-static void mux_rx_handle_work(struct work_struct *pwork)
+
+int ts0710_open_channel(u8 dlci)
 {
-    mux_rx_work                     *work = container_of(pwork, mux_rx_work, work);
-    int                             dlci = work->dlci;
-    struct mux_frame_struct     *mux_frame_data = NULL;
-    struct mux_queue_struct         *queue = &mux_rx_q[dlci];
-    dlci_struct                     *dlci_data = (dlci_struct*)queue->user_data;
-
-    mux_frame_data = mux_queue_dequeue(queue);
-
-    if(mux_frame_data != NULL)
-    {
-        MUX_DBG(8,"MUX DLCI:%d we have data\n", dlci);
-
-        ts0710_recv_data( &ts0710_connection,
-                          (short_frame*)mux_frame_data->data,
-                          mux_frame_data->size,
-                          mux_frame_data->dlci );
-
-        kfree(mux_frame_data->data);
-
-        mux_queue_free(queue, mux_frame_data);
-
-        if(mux_queue_count(queue) > 0)
-        {
-            queue_work(dlci_data->rx.workqueue, &(dlci_data->rx.work.work));
-        }
-    }
-}
-
-static void mux_rx_post(struct tty_struct *tty, const u8 *data, int framelen)
-{
-    struct mux_queue_struct         *queue;
-    dlci_struct                     *dlci_data;
-    struct mux_frame_struct         *mux_frame_data = NULL;
-    short_frame                     *short_pkt;
-    int                             payload_len;
-    int                             dlci = 0;
-
-    short_pkt = (short_frame *) (data + ADDRESS_FIELD_OFFSET);
-
-    dlci = short_pkt->h.addr.server_chn << 1 | short_pkt->h.addr.d;
-
-    queue = &mux_rx_q[dlci];
-    dlci_data = (dlci_struct*)queue->user_data;
-
-    if(dlci >= 0 && (dlci_data == NULL || dlci_data->rx.workqueue == NULL) )
-    {
-        MUX_ERR("RX queue was not created; dlci = %d\n",dlci);
-        return;
-    }
-
-    // We will no longer need the start-stop flags and FCS, so cut it off
-    framelen -= FLAG_SIZE + SEQ_FIELD_SIZE + FCS_SIZE;
-
-    MUX_DBG(8,"MUX DLCI:%d prepare data for RX proccessing\n", dlci);
-
-    mux_frame_data = mux_queue_alloc(queue);
-
-    if (mux_frame_data != NULL)
-    {
-        mux_frame_data->data = kmalloc(framelen, GFP_KERNEL);
-        if (mux_frame_data->data == NULL)
-        {
-            MUX_ERR("RX work->data alloc failed\n");
-            kfree(mux_frame_data);
-            mux_queue_free(queue, mux_frame_data);
-            return;
-        }
-
-        if (short_pkt->h.length.ea == 1)
-        {
-            payload_len = short_pkt->h.length.len;
-        }
-        else
-        {
-            long_frame *long_pkt = (long_frame*)short_pkt;
-            payload_len = GET_LONG_LENGTH(long_pkt->h.length);
-        }
-
-        mux_frame_data->size = payload_len;
-        mux_frame_data->dlci = dlci;
-
-        memcpy(mux_frame_data->data, data + ADDRESS_FIELD_OFFSET, framelen);
-
-        mux_queue_enqueue(queue, mux_frame_data);
-
-        MUX_DBG(8,"MUX DLCI:%d data RX proccessing %p \n", dlci, mux_frame_data);
-
-        queue_work(dlci_data->rx.workqueue, &(dlci_data->rx.work.work));
-    }
-    else
-    {
-        MUX_ERR("RX mux_frame_data alloc failed\n");
-    }
-}
-
-static void mux_rx_raw_data(struct tty_struct *tty, const u8 *data, char *flags, int size)
-{
-    struct mux_data *st         = (struct mux_data *)tty->disc_data;
-    u8 *frame                   = NULL;
-    short_frame *short_pkt      = NULL;
-    long_frame *long_pkt        = NULL;
-    int offset                  = 0;
-    int fcs_len                 = 0;
-    u8 fcs;
-    u8 *mux_cbn_start_frame     = NULL;
-    u8 *mux_cbn_end_frame       = (u8 *)&data[0];
-    unsigned int bad_count      = 0;
-
-    while(offset < size)
-    {
-        switch (st->state)
-        {
-            case OUT_OF_FRAME:
-                if(data[offset] == (u8)TS0710_BASIC_FLAG)
-                {
-                    frame = (u8 *)&data[offset];
-                    if(frame[1] == (u8)TS0710_BASIC_FLAG) /* this is fix of out of sync with seq F9 F9*/
-                    {
-                        MUX_DBG(9,"bad packet second F9 pos=%d\n", offset);
-                        offset++;
+	ts0710_con *ts0710 = &ts0710_connection;
+	int try;
+	int retval;
+	unsigned long t;
+    
+	retval = -ENODEV;
+	if (dlci == 0) { /* control channel */
+		if (ts0710->dlci[0].state & (CONNECTED | FLOW_STOPPED)) {
+			return 0;
+		} else if (ts0710->dlci[0].state == CONNECTING) {
+			/* Reentry */
+			TS0710_PRINTK("MUX DLCI: 0, reentry to open DLCI 0, pid: %d, %s !\n",
+                          current->pid, current->comm);
+			try = 11;
+			while (try--) {
+				t = jiffies;
+				interruptible_sleep_on_timeout(&ts0710->dlci[0].
+                                               open_wait,
+                                               TS0710MUX_TIME_OUT);
+				if ((ts0710->dlci[0].state == CONNECTED)
+				    || (ts0710->dlci[0].state ==
+                        FLOW_STOPPED)) {
+                        retval = 0;
                         break;
+                    } else if (ts0710->dlci[0].state == REJECTED) {
+                        retval = -EREJECTED;
+                        break;
+                    } else if (ts0710->dlci[0].state ==
+                               DISCONNECTED) {
+                        break;
+                    } else if (signal_pending(current)) {
+                        TS0710_PRINTK(
+                                      "MUX DLCI:%d Wait for connecting got signal!\n",
+                                      dlci);
+                        retval = -EAGAIN;
+                        break;
+                    } else if ((jiffies - t) >= TS0710MUX_TIME_OUT) {
+                        TS0710_PRINTK
+						("MUX DLCI:%d Wait for connecting timeout!\n",
+                         dlci);
+                        continue;
+                    } else if (ts0710->dlci[0].state == CONNECTING) {
+                        continue;
                     }
-                    st->state = INSIDE_FRAME_HEADER;
-                    mux_cbn_start_frame = frame;
+			}
+            
+			if (ts0710->dlci[0].state == CONNECTING)
+				ts0710->dlci[0].state = DISCONNECTED;
+		} else if ((ts0710->dlci[0].state != DISCONNECTED)
+                   && (ts0710->dlci[0].state != REJECTED)) {
+			TS0710_PRINTK("MUX DLCI:%d state is invalid!\n", dlci);
+			return retval;
+		} else {
+			ts0710->initiator = 1;
+			ts0710->dlci[0].state = CONNECTING;
+			ts0710->dlci[0].initiator = 1;
+            
+			t = jiffies;
+			send_sabm(ts0710, 0);
+			interruptible_sleep_on_timeout(&ts0710->dlci[0].
+                                           open_wait,
+                                           TS0710MUX_TIME_OUT);
+			if ((ts0710->dlci[0].state == CONNECTED)
+			    || (ts0710->dlci[0].state ==
+                    FLOW_STOPPED)) {
+                    retval = 0;
+                } else if (ts0710->dlci[0].state == REJECTED) {
+                    TS0710_PRINTK
+					("MUX DLCI:%d Send SABM got rejected!\n",
+                     dlci);
+                    retval = -EREJECTED;
+                } else if (signal_pending(current)) {
+                    TS0710_PRINTK("MUX DLCI:%d Send SABM got signal!\n", dlci);
+                    retval = -EAGAIN;
+                } else if ((jiffies - t) >= TS0710MUX_TIME_OUT) {
+                    TS0710_PRINTK
+					("MUX DLCI:%d Send SABM timeout!\n",
+                     dlci);
+                    retval = -ENODEV;
                 }
-                else
-                {
-                    bad_count++;
-                    offset++;
-                    break;
-                }
-
-            case INSIDE_FRAME_HEADER:
-                short_pkt = (short_frame *) (frame + ADDRESS_FIELD_OFFSET);
-                if (short_pkt->h.length.ea == 1)
-                {
-                    st->framelen = mux_short_frame_size(&short_pkt->h);
-                    fcs_len = sizeof(short_frame);
-                }
-                else
-                {
-                    long_pkt = (long_frame *) short_pkt;
-                    st->framelen = mux_long_frame_size(&long_pkt->h);
-                    fcs_len = sizeof(long_frame);
-                }
-
-                if(st->framelen > MAX_FRAME_SIZE)
-                {
-                    MUX_DBG(3,"bad packet size %d\n", st->framelen);
-
-                    // Loop exit condition
-                    st->state = OUT_OF_FRAME;
-                    offset++;
-                    break;
-                }
-
-                // Calculate checksum
-                st->fcs = mux_fcs_compute(frame + ADDRESS_FIELD_OFFSET, fcs_len);
-                st->state = INSIDE_FRAME_BODY;
-
-            case INSIDE_FRAME_BODY:
-                st->state = OUT_OF_FRAME;
-                if(offset + st->framelen > size)
-                {
-                    offset = size;
-                    break;
-                }
-
-                fcs = frame[st->framelen - FRAME_TAIL_SIZE];
-                MUX_TRACE("FCS computed = %X received = %X", st->fcs, fcs);
-
-                if(st->fcs == fcs)
-                {
-                    mux_rx_post(tty, frame, st->framelen);
-                }
-                else
-                {
-                    MUX_ERR("Bad checksum, discarding packet\n");
-                }
-
-                offset += st->framelen;
-                mux_cbn_end_frame = (u8 *)&data[offset];
-                break;
-            default:
-                MUX_ERR("Bad state in packet proccessing\n");
-                return;
-        }
-    }
-
-    if(bad_count != 0)
-        MUX_DBG(1,"bad packet data len=%d from %d\n", bad_count,size);
-
-    if(mux_cbn_end_frame < &data[size])
-    {
-        mux_cbn_splt_frame_len = &data[size] - mux_cbn_end_frame;
-        mux_cbn_splt_start_frame = kmalloc(mux_cbn_splt_frame_len,GFP_KERNEL);
-
-        if(mux_cbn_splt_start_frame != NULL)
-        {
-            memcpy(mux_cbn_splt_start_frame, mux_cbn_end_frame, mux_cbn_splt_frame_len);
-        }
-        else
-        {
-            mux_cbn_splt_frame_len = 0;
-            MUX_ERR("cannot allocate memory for split frame");
-        }
-    }
-}
-/*--------------------------------------------------------------------*/
-/* END MUX RX code                                                    */
-/*--------------------------------------------------------------------*/
-
-
-/*--------------------------------------------------------------------*/
-/* TTY driver routines                                                */
-/*--------------------------------------------------------------------*/
-
-static int mux_open(struct tty_struct *tty, struct file *filp)
-{
-    int                     retval = -ENODEV;
-    int                     dlci = tty->index;
-    dlci_struct             *dlci_data = &ts0710_connection.dlci[dlci];
-
-    mux_filp[dlci] = filp;
-
-    if (!(ipc_tty && dlci))
-        return retval;
-
-    mux_tty[dlci]++;
-    mux_table[dlci] = tty;
-
-    /* Open server channel 0 first */
-    if ((retval = ts0710_open_channel(0)) != 0) {
-        MUX_ERR("MUX: Can't connect server channel 0! ret = %d\n", retval);
-        ts0710_init();
-
-        mux_tty[dlci]--;
-        return retval;
-    }
-
-    /* Now establish DLCI connection */
-    if ((retval = ts0710_open_channel(dlci)) != 0)
-    {
-        MUX_ERR("MUX: Can't connected channel %d!\n",
-                  dlci);
-        ts0710_reset_dlci(dlci);
-
-        mux_tty[dlci]--;
-        return retval;
-    }
-
-    dlci_data->tx.wakeup_flag = 0;
-    tty->low_latency = 1;
-
-    return 0;
+            
+			if (ts0710->dlci[0].state == CONNECTING)
+				ts0710->dlci[0].state = DISCONNECTED;
+			wake_up_interruptible(&ts0710->dlci[0].open_wait);
+		}
+	} else {        /* other channel */
+		if ((ts0710->dlci[0].state != CONNECTED)
+		    && (ts0710->dlci[0].state != FLOW_STOPPED)) {
+			return retval;
+		} else if ((ts0710->dlci[dlci].state == CONNECTED)
+                   || (ts0710->dlci[dlci].state == FLOW_STOPPED)) {
+			return 0;
+		} else if ((ts0710->dlci[dlci].state == NEGOTIATING)
+                   || (ts0710->dlci[dlci].state == CONNECTING)) {
+			/* Reentry */
+            
+			t = jiffies;
+			interruptible_sleep_on_timeout(&ts0710->
+                                           dlci[dlci].
+                                           open_wait,
+                                           TS0710MUX_TIME_OUT);
+			if ((ts0710->dlci[dlci].state == CONNECTED)
+			    || (ts0710->dlci[dlci].state ==
+                    FLOW_STOPPED))
+				retval = 0;
+			else if (ts0710->dlci[dlci].state == REJECTED)
+				retval = -EREJECTED;
+			else if (signal_pending(current))
+				retval = -EAGAIN;
+            
+			if ((ts0710->dlci[dlci].state == NEGOTIATING)
+			    || (ts0710->dlci[dlci].state == CONNECTING))
+				ts0710->dlci[dlci].state = DISCONNECTED;
+		} else if ((ts0710->dlci[dlci].state != DISCONNECTED)
+                   && (ts0710->dlci[dlci].state != REJECTED)) {
+			TS0710_PRINTK("MUX DLCI:%d state is invalid!\n", dlci);
+			return retval;
+		} else {
+			ts0710->dlci[dlci].state = CONNECTING;
+			if (ts0710->dlci[dlci].state == CONNECTING) {
+				t = jiffies;
+				send_sabm(ts0710, dlci);
+				interruptible_sleep_on_timeout(&ts0710->
+                                               dlci
+                                               [dlci].
+                                               open_wait,
+                                               TS0710MUX_TIME_OUT);
+				if ((ts0710->dlci[dlci].state ==
+				     CONNECTED)
+				    || (ts0710->dlci[dlci].state ==
+                        FLOW_STOPPED)) {
+                        retval = 0;
+                    } else if (ts0710->dlci[dlci].state ==
+                               REJECTED) {
+                        TS0710_PRINTK
+						("MUX DLCI:%d Send SABM got rejected!\n",
+                         dlci);
+                        retval = -EREJECTED;
+                    } else if (signal_pending(current)) {
+                        TS0710_PRINTK
+						("MUX DLCI:%d Send SABM got signal!\n",
+                         dlci);
+                        retval = -EAGAIN;
+                    }
+			}
+            
+			if ((ts0710->dlci[dlci].state == NEGOTIATING)
+			    || (ts0710->dlci[dlci].state == CONNECTING))
+				ts0710->dlci[dlci].state = DISCONNECTED;
+			wake_up_interruptible(&ts0710->dlci[dlci].open_wait);
+		}
+	}
+	return retval;
 }
 
+/****************************
+ * TTY driver routines
+ *****************************/
 static void mux_close(struct tty_struct *tty, struct file *filp)
 {
-    u8 dlci;
-
-    UNUSED_PARAM(filp);
-    MUX_DBG(7, "%s called \n", __FUNCTION__);
-    dlci = tty->index;
-    if (MUX_INVALID(dlci))
-        return;
-
-    if (mux_tty[dlci] > 0)
-        mux_tty[dlci]--;
-
-    if (mux_tty[dlci] == 0)
-#ifdef LGE_KERNEL_MUX
-    {
-        MUX_DBG(6,"skip to close channel[%d]\n", dlci);
-        if(dlci==12)
-        {
-            ts0710_flow_on(dlci, &ts0710_connection);
-        }
-    }
-#else
-    {
-        MUX_DBG(6,"close channel[%d]\n", dlci);
-        ts0710_close_channel(dlci);
-    }
-#endif
-
-    mux_filp[dlci] = NULL;
-    mux_table[dlci] = NULL;
-
-    if (mux_tty[dlci] != 0)
-        return;
-
-    tty_unthrottle(tty);
-//  ts0710_flow_on(dlci, ts0710);
-
-    wake_up_interruptible(&tty->read_wait);
-    wake_up_interruptible(&tty->write_wait);
-    tty->packet = 0;
-}
-
-
-static int mux_write(struct tty_struct *tty, const unsigned char *buf, int count)
-{
-    ts0710_con                  *ts0710  = &ts0710_connection;
-    int                         dlci             = tty->index;
-    int                         written         = 0;
-    int                         frame_size      = 0;
-    int                         frame_written   = 0;
-    bool                        is_nonblocking = false;
-    dlci_struct                 *dlci_data = &ts0710_connection.dlci[dlci];
-
-    if(mux_filp[dlci] != NULL && mux_filp[dlci]->f_flags & O_NONBLOCK)
-        is_nonblocking = true;
-
-    MUX_TRACE("packet buf %p count %d", buf, count);
-
-    if(ts_ldisc_called)
-    {
-    	MUX_DBG(3, "%s: ts_ldisc_called = %d, return ECANCELED", __FUNCTION__, ts_ldisc_called);
-    	return -ECANCELED;
-    }
-
-    if (count <= 0)
-    {
-        MUX_ERR("mux_write:ERROR. count %d\n", count );
-        return -EINVAL;
-    }
-
-    if(MUX_FLOW_CONTROLLED(dlci_data))
-    {
-        MUX_DBG(6,"TS0710 Write:Flow OFF state = %d \n",dlci_data->state);
-
-        if(is_nonblocking)
-        {
-            dlci_data->tx.wakeup_flag = 1;
-            return -EWOULDBLOCK;
-        }
-        else
-        {
-            MUX_DBG(6,"TS0710 Write: down\n");
-            while (down_interruptible(&dlci_data->tx.write_sema)!=0)
-            {};
-        }
-    }
-
-    while(count)
-    {
-        frame_size = MIN(count, dlci_data->mtu);
-
-        MUX_TRACE("send packet sz %d dlci %d", frame_size, dlci);
-
-        frame_written = mux_tx_uih_data(ts0710, dlci, (u8 *)(buf + written), frame_size);
-
-        if(frame_written <= 0)
-        {
-            if(MUX_FLOW_CONTROLLED(dlci_data))
-            {
-                if(is_nonblocking)
-                {
-                    dlci_data->tx.wakeup_flag = 1;
-                    break;
-                }
-                else
-                {
-                    MUX_DBG(6,"TS0710 Write: down\n");
-                    while (down_interruptible(&dlci_data->tx.write_sema)!=0)
-                    {};
-                }
-            }
-            else
-            {
-                MUX_DBG(7,"TS0710:mux_write(), NOMEM, written %d bytes, should be stopped by client \n",written);
-                dlci_data->tx.wakeup_flag = 1;
-                return written;
-            }
-        }
-        else
-        {
-            written += frame_written;
-            count -= frame_written;
-        }
-    };
-    return written;
+	ts0710_con *ts0710 = &ts0710_connection;
+	int line;
+	u8 dlci;
+    
+	UNUSED_PARAM(filp);
+    
+	line = tty->index;
+    
+	TS0710_PRINTK("mux_close /dev/pts%d, mux_tty[line] = %d\n ", line, mux_tty[line]);
+    
+	if (MUX_INVALID(line))
+		return;
+	if (mux_tty[line] > 0)
+		mux_tty[line]--;
+    
+	dlci = line;
+    
+    // LGE_UPDATE_S CP Reset & Response halt Recovery
+	if (mux_tty[line] == 0) {
+		mux_table[line] = NULL;
+        /*Workaround Infineon modem - DLS opened once will never be closed*/
+		return;
+	}
+    // LGE_UPDATE_E CP Reset & Response halt Recovery
+    
+	mux_filp[line] = NULL;
+    
+	if (mux_tty[line] != 0)
+		return;
+    
+	if ((mux_send_info_flags[line]) && (mux_send_info[line])) {
+		mux_send_info_flags[line] = 0;
+		kfree(mux_send_info[line]);
+		mux_send_info[line] = 0;
+		TS0710_DEBUG("Free mux_send_info for /dev/mux%d\n", line);
+	}
+    
+	if ((mux_recv_info_flags[line])
+	    && (mux_recv_info[line])
+	    && (mux_recv_info[line]->total == 0)) {
+		mux_recv_info_flags[line] = 0;
+		free_mux_recv_struct(mux_recv_info[line]);
+		mux_recv_info[line] = 0;
+		TS0710_DEBUG("Free mux_recv_info for /dev/mux%d\n", line);
+	}
+    
+	ts0710_flow_on(dlci, ts0710);
+    
+	wake_up_interruptible(&tty->read_wait);
+	wake_up_interruptible(&tty->write_wait);
+	tty->packet = 0;
 }
 
 static void mux_throttle(struct tty_struct *tty)
 {
-    MUX_DBG(9, "throttle on pts%d", tty->index);
+	ts0710_con *ts0710 = &ts0710_connection;
+	int line;
+	int i;
+	u8 dlci;
+    
+	line = tty->index;
+	if (MUX_INVALID(line))
+		return;
+    
+    
+	TS0710_DEBUG("Enter into %s, minor number is: %d\n", __FUNCTION__,
+                 line);
+    
+	dlci = line;
+	if ((ts0710->dlci[0].state != CONNECTED)
+	    && (ts0710->dlci[0].state != FLOW_STOPPED))
+		return;
+	else if ((ts0710->dlci[dlci].state != CONNECTED)
+             && (ts0710->dlci[dlci].state != FLOW_STOPPED))
+		return;
+    
+	if (ts0710->dlci[dlci].flow_control)
+		return;
+    
+	for (i = 0; i < 3; i++) {
+		if (ts0710_msc_msg
+            (ts0710, EA | FC | RTC | RTR | DV, MCC_CMD, dlci) < 0) {
+			continue;
+		} else {
+			TS0710_LOG("MUX Send Flow off on dlci %d\n", dlci);
+			ts0710->dlci[dlci].flow_control = 1;
+			break;
+		}
+	}
 }
 
 static void mux_unthrottle(struct tty_struct *tty)
 {
-    int                     dlci = tty->index;
-    dlci_struct             *dlci_data = &ts0710_connection.dlci[dlci];
-
-    MUX_DBG(9, "unthrottle on pts%d", tty->index);
-
-    if (MUX_INVALID(dlci))
-        return;
-
-    up(&dlci_data->rx.rx_completion);
-    down_trylock(&dlci_data->rx.rx_completion);
+	ts0710_con *ts0710 = &ts0710_connection;
+	int line;
+	u8 dlci;
+	mux_recv_struct *recv_info;
+    
+	line = tty->index;
+	if (MUX_INVALID(line))
+		return;
+    
+	if ((!mux_recv_info_flags[line]) || (!mux_recv_info[line]))
+		return;
+    
+	TS0710_DEBUG("Enter into %s, minor number is: %d\n", __FUNCTION__,
+                 line);
+    
+	recv_info = mux_recv_info[line];
+	dlci = line;
+    
+	if (recv_info->total)
+		recv_info->post_unthrottle = 1;
+    /* schedule_work(&post_recv_tqueue); */
+	else
+		ts0710_flow_on(dlci, ts0710);
 }
 
 static int mux_chars_in_buffer(struct tty_struct *tty)
 {
-    ts0710_con *ts0710  = &ts0710_connection;
-    u8 dlci             = tty->index;
+	ts0710_con *ts0710 = &ts0710_connection;
+	int retval;
+	int line;
+	u8 dlci;
+	mux_send_struct *send_info;
+    
+	retval = TS0710MUX_MAX_CHARS_IN_BUF;
+    
+	line = tty->index;
+	if (MUX_INVALID(line))
+		goto out;
+    
+	dlci = line;
+    
+	if (!MUX_USABLE(ts0710, dlci))
+		goto out;
+    
+	if (!(mux_send_info_flags[line]))
+		goto out;
+	send_info = mux_send_info[line];
+	if (!send_info)
+		goto out;
+	if (send_info->filled)
+		goto out;
+    
+	retval = 0;
+    
+out:
+	return retval;
+}
 
-    if ((MUX_INVALID(dlci))
-        || (! MUX_USABLE(ts0710, dlci)))
-        return 0;
+static int mux_write(struct tty_struct *tty,
+                     const unsigned char *buf, int count)
+{
+	ts0710_con *ts0710 = &ts0710_connection;
+	u8 dlci;
+	int written = 0;
+    
+	int frame_size = 0;
+	int frame_written = 0;
+    
+	if (!count)
+		return 0;
+    
+	dlci = tty->index;
+    
+	/*
+	 * FIXME: split big packets into small one
+	 * FIXME: support DATATAG
+	 * */
+    /* To remove Motorola's modem specific*/
+	if (ts0710->dlci[dlci].state == FLOW_STOPPED) {
+		TS0710_DEBUG("TS0710 Write:Flow OFF state = %d dlci %d \n",
+                     ts0710->dlci[dlci].state,
+                     dlci);
+		if (mux_filp[dlci]->f_flags & O_NONBLOCK) {
+			TS0710_DEBUG(
+                         "TS0710 Write: returning  EWOULDBLOCK for flow stopped channel\n");
+			return -EWOULDBLOCK;
+		} else {
+			while (down_interruptible(&spi_write_data_sema[dlci]) != 0) {
+			}
+			;
+		}
+	}
+    
+    /* spliting big packets into small one */
+	while (count) {
+		frame_size = min(count, ts0710->dlci[dlci].mtu);
+		frame_written = mux_send_uih_data(ts0710, dlci, (u8 *)(buf + written),
+                                          frame_size);
         
-    if(dlci == 0)
-    {
-		return 65535;
-    }
-  
-    return ts0710->dlci[dlci].tx.chars_in_buffer;
+		if (frame_written == -ENOMEM) { // no memory or free-queue
+			TS0710_DEBUG(
+                         "\nTS0710:mux_write(), frame_written = %d, mux_filp[%d]->f_flag=%d ts0710->dlci[dlci].state=%d \n",
+                         frame_written, dlci, mux_filp[dlci]->f_flags,
+                         ts0710->dlci[dlci].state);
+			if (mux_filp[dlci]->f_flags & O_NONBLOCK) {
+				return -EWOULDBLOCK;
+			} else if (ts0710->dlci[dlci].state == FLOW_STOPPED) {
+				down(&spi_write_data_sema[dlci]);
+			} else {
+				TS0710_DEBUG(
+                             "\nTS0710:mux_write(), NOMEM, returning 0, should be stopped by mtx \n");
+				return 0;
+			}
+		}
+        
+		if (frame_written < 0) {
+			TS0710_DEBUG("\nTS0710:mux_write(): returning %d \n", frame_written);
+			/* send frame error */
+			return -1;
+		} else {
+			written += frame_written;
+			count -= frame_written;
+		}
+	}
+	;
+	return written;
 }
 
 static int mux_write_room(struct tty_struct *tty)
 {
-    dlci_struct                     *dlci_data;
-    int dlci = tty->index;
-
-    if (MUX_INVALID(dlci))
-        return 0;
-
-    dlci_data = &ts0710_connection.dlci[dlci];
-
-    if (all_flow_off_from_modem
-        || (dlci_data->state == FLOW_STOPPED))
-    {
-        MUX_DBG(6,"write_room: Flow stopped, returning ZERO\n");
-        return 0;
-    }
-    else if (dlci_data->state != CONNECTED)
-    {
-        MUX_DBG(6,"write_room: DLCI %d not connected\n", dlci);
-        return 0;
-    }
-    else if((frame_usage >= MAX_WAITING_FRAMES) || (dlci_data->tx.frame_count >= HI_WM_MUX_TX))
-    {
-        MUX_DBG(6,"write_room: Queue overflow\n");
-        return 0;
-    }
-
-    return ((HI_WM_MUX_TX - dlci_data->tx.frame_count) * dlci_data->mtu);
-}
-
-
-static bool mux_tx_queue_search_dlci_cb(struct mux_queue_struct *q, struct mux_frame_struct *node)
-{
-    int             dlci = (int)q->user_data;
-
-    if(node->dlci == dlci)
-        return true;
-
-    return false;
-}
-
-
-static void mux_flush_dlci(int dlci)
-{
-    struct mux_frame_struct     *frame;
-    dlci_struct                     *dlci_data = &ts0710_connection.dlci[dlci];
-    int                             priority = dlci_data->priority;
-
-    if(dlci_data->state == DISCONNECTED)
-        return;
-
-    MUX_DBG(8, "flush buffer on pts%d", dlci);
-
-    mux_tx_q->user_data = (void*)dlci;
-    while( (frame = mux_queue_search(&mux_tx_q[priority], mux_tx_queue_search_dlci_cb)) != NULL )
-    {
-        kfree(frame->data);
-        mux_queue_free(&mux_tx_q[priority], frame);
-    }
-
-    spin_lock_bh(&tx_lock);
-    dlci_data->tx.frame_count = 0;
-    dlci_data->tx.chars_in_buffer = 0;
-    spin_unlock_bh(&tx_lock);
+	ts0710_con *ts0710 = &ts0710_connection;
+	int retval;
+	int line;
+	u8 dlci;
+	mux_send_struct *send_info;
+    
+	retval = 0;
+    
+	line = tty->index;
+	if (MUX_INVALID(line))
+		goto out;
+    
+	dlci = line;
+	if (ts0710->dlci[0].state == FLOW_STOPPED) {
+		TS0710_DEBUG("Flow stopped on all channels, returning ZERO\n");
+		goto out;
+	} else if (ts0710->dlci[dlci].state == FLOW_STOPPED) {
+		TS0710_DEBUG("Flow stopped, returning ZERO\n");
+		goto out;
+	} else if (ts0710->dlci[dlci].state != CONNECTED) {
+		TS0710_DEBUG("DLCI %d not connected\n", dlci);
+		goto out;
+	}
+    
+	if (!(mux_send_info_flags[line]))
+		goto out;
+    
+	send_info = mux_send_info[line];
+	if (!send_info)
+		goto out;
+    
+	if (send_info->filled)
+		goto out;
+    
+	retval = ts0710->dlci[dlci].mtu - 1;
+    
+out:
+	TS0710_DEBUG("\nTS0710:write_room retval %d \n", retval);
+	return retval;
 }
 
 static void mux_flush_buffer(struct tty_struct *tty)
 {
-    mux_flush_dlci(tty->index);
+	int line;
+    
+	line = tty->index;
+	if (MUX_INVALID(line))
+		return;
+    
+    
+	TS0710_PRINTK("MUX %s: line is:%d\n", __FUNCTION__, line);
+    
+	if ((mux_send_info_flags[line])
+	    && (mux_send_info[line])
+	    && (mux_send_info[line]->filled))
+        
+		mux_send_info[line]->filled = 0;
+    
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc->ops->write_wakeup)
+		tty->ldisc->ops->write_wakeup(tty);
 }
 
-static void mux_hangup(struct tty_struct *tty)
+static int mux_open(struct tty_struct *tty, struct file *filp)
 {
-    MUX_DBG(9, "hangup on pts%d", tty->index);
+	int retval;
+	int line;
+	u8 dlci;
+	mux_send_struct *send_info;
+	mux_recv_struct *recv_info;
+    
+	retval = -ENODEV;
+    
+	line = tty->index;
+	mux_filp[line] = filp;
+    
+	TS0710_PRINTK("mux_open start: %s ch: %d\n", current->comm, line);
+	if (!(ipc_tty && line))
+		// TS0710_PRINTK("MUX: SPI driver is not available yet!\n");
+		return -ENODEV;
+    
+	mux_tty[line]++;
+	dlci = line;
+	mux_table[line] = tty;
+    
+	/* Open server channel 0 first */
+	if ((retval = ts0710_open_channel(0)) != 0) {
+		TS0710_PRINTK("MUX: Can't connect server channel 0!\n");
+		ts0710_init();
+        
+		mux_tty[line]--;
+		goto out;
+	}
+    
+	/* Allocate memory first. As soon as connection has been established, MUX may receive */
+	if (mux_send_info_flags[line] == 0) {
+		send_info =
+        (mux_send_struct *)kmalloc(sizeof(mux_send_struct),
+                                   GFP_KERNEL);
+		if (!send_info) {
+			retval = -ENOMEM;
+            
+			mux_tty[line]--;
+			goto out;
+		}
+		send_info->length = 0;
+		send_info->flags = 0;
+		send_info->filled = 0;
+		mux_send_info[line] = send_info;
+		mux_send_info_flags[line] = 1;
+		TS0710_DEBUG("Allocate mux_send_info for /dev/pts%d", line);
+	}
+    
+	if (mux_recv_info_flags[line] == 0) {
+		recv_info =
+        (mux_recv_struct *)kmalloc(sizeof(mux_recv_struct),
+                                   GFP_KERNEL);
+		if (!recv_info) {
+			mux_send_info_flags[line] = 0;
+			kfree(mux_send_info[line]);
+			mux_send_info[line] = 0;
+			TS0710_DEBUG("Free mux_send_info for /dev/pts%d", line);
+			retval = -ENOMEM;
+            
+			mux_tty[line]--;
+			goto out;
+		}
+		recv_info->length = 0;
+		recv_info->total = 0;
+		recv_info->next = 0;
+		recv_info->no_tty = line;
+		recv_info->post_unthrottle = 0;
+		mux_recv_info[line] = recv_info;
+		mux_recv_info_flags[line] = 1;
+		TS0710_DEBUG("Allocate mux_recv_info for /dev/mux%d", line);
+	}
+    
+	/* Now establish DLCI connection */
+	if (mux_tty[dlci] > 0) {
+		if ((retval = ts0710_open_channel(dlci)) != 0) {
+			TS0710_PRINTK("MUX: Can't connected channel %d!\n",
+                          dlci);
+			ts0710_reset_dlci(dlci);
+            
+			mux_send_info_flags[line] = 0;
+			kfree(mux_send_info[line]);
+			mux_send_info[line] = 0;
+			TS0710_DEBUG("Free mux_send_info for /dev/mux%d", line);
+            
+			mux_recv_info_flags[line] = 0;
+			free_mux_recv_struct(mux_recv_info[line]);
+			mux_recv_info[line] = 0;
+			TS0710_DEBUG("Free mux_recv_info for /dev/mux%d", line);
+            
+			mux_tty[line]--;
+			goto out;
+		}
+	}
+    
+    
+	retval = 0;
+out:
+	return retval;
 }
 
-
-static void mux_set_ldisc(struct tty_struct *tty)
+/* mux dispatcher, call from serial.c receiver_chars() */
+void mux_dispatcher(struct tty_struct *tty)
 {
-    MUX_DBG(9, "line discipline changed for pts%d to %s", tty->index, tty->ldisc->ops->name);
+	UNUSED_PARAM(tty);
+    
+	/* schedule_work(&receive_tqueue); */
 }
 
-/*--------------------------------------------------------------------*/
-/* END TTY driver routines                                            */
-/*--------------------------------------------------------------------*/
+static void ts_ldisc_rx_post(struct tty_struct *tty, const u8 *data, char *flags, int count)
+{
+	int framelen;
+	short_frame *short_pkt;
+	long_frame *long_pkt;
+    
+	short_pkt = (short_frame *)(data + ADDRESS_FIELD_OFFSET);
+	if (short_pkt->h.length.ea == 1) {
+		framelen = TS0710_MAX_HDR_SIZE + short_pkt->h.length.len + 1 + SEQ_FIELD_SIZE;
+	} else {
+		long_pkt = (long_frame *)(data + ADDRESS_FIELD_OFFSET);
+		framelen = TS0710_MAX_HDR_SIZE + GET_LONG_LENGTH(long_pkt->h.length) + 2 +
+        SEQ_FIELD_SIZE;
+	}
+    /* To remove Motorola's modem specific*/
+	ts0710_recv_data(&ts0710_connection,
+                     (char *)(data + 1),
+                     framelen - 2);
+}
 
-/*--------------------------------------------------------------------*/
-/* Line Discipline routines                                           */
-/*--------------------------------------------------------------------*/
+void ts_ldisc_rx(struct tty_struct *tty, const u8 *data, char *flags, int size)
+{
+	struct mux_data *st = (struct mux_data *)tty->disc_data;
+    
+	int i;
+	short_frame *short_pkt;
+	long_frame *long_pkt;
+	for (i = 0; i < size; i++) {
+		switch (st->state) {
+            case OUT_OF_FRAME:
+                if (data[i] == (u8)TS0710_BASIC_FLAG) {
+                    st->state = INSIDE_FRAME_HEADER;
+                    st->copy_index = 0;
+                } else {
+                    printk("\nTS0710:ts_ldisc_rx:bad_data[%d]=0x%x framelen=%d\n",
+                           i, data[i],
+                           st->framelen);
+                    st->state = FRAME_ERROR;
+                    break;
+                }
+            case INSIDE_FRAME_HEADER:
+                if (st->copy_index < TS0710_MAX_HDR_SIZE) {
+                    if ((st->copy_index == 1) && (data[i] == (u8)TS0710_BASIC_FLAG)) /* this is fix of out of sync with seq F9 F9*/
+                        st->copy_index = 0;
+                    st->chunk[st->copy_index++] = data[i];
+                    break;
+                } else {
+                    short_pkt = (short_frame *)(st->chunk + ADDRESS_FIELD_OFFSET);
+                    if (short_pkt->h.length.ea == 1) {
+                        st->framelen = TS0710_MAX_HDR_SIZE +
+                        short_pkt->h.length.len + 1 +
+                        SEQ_FIELD_SIZE;
+                    } else {
+                        long_pkt = (long_frame *)short_pkt;
+                        st->framelen = TS0710_MAX_HDR_SIZE + GET_LONG_LENGTH(
+                                                                             long_pkt->h.length) + 2 + SEQ_FIELD_SIZE;
+                    }
+                    if (st->framelen > MAX_FRAME_SIZE) {
+                        printk(
+                               "\nTS0710:ts_ldisc_rx:Too big frame to copy %d!\n",
+                               st->framelen);
+                        st->state = OUT_OF_FRAME;
+                        break;
+                    }
+                    st->state = INSIDE_FRAME_BODY;
+                }
+            case INSIDE_FRAME_BODY:
+                if (st->copy_index < st->framelen)
+                    st->chunk[st->copy_index++] = data[i];
+                if (!(st->copy_index < st->framelen)) {
+                    TS0710_DEBUG("Good Frame : data[%d]=0x%x framelen=%d\n", i,
+                                 data[i],
+                                 st->framelen);
+                    ts_ldisc_rx_post(tty, st->chunk, flags, st->framelen);
+                    st->state = OUT_OF_FRAME;
+                }
+                break;
+            case FRAME_ERROR:
+                if (data[i] == (u8)TS0710_BASIC_FLAG) {
+                    st->state = INSIDE_FRAME_HEADER;
+                    st->copy_index = 0;
+                }
+                break;
+            default:
+                printk("\nTS0710:ts_ldisc_rx:unknown state!!!!!!!\n");
+                return;
+		}
+	}
+}
+
+static void clear_nodes(void)
+{
+	int i;
+	void *next_ptr;
+	u8 *data_ptr = NULL;
+    
+	TS0710_PRINTK("clear_nodes start\n");
+    
+	spin_lock_irqsave(&frame_nodes_lock, lock_flag);
+    
+	do {
+		next_ptr = NULL;
+        
+		for (i = 0; i < TS0710MAX_PRIORITY_NUMBER; i++) {
+			if (frame_to_send[i] != NULL) {
+				data_ptr = frame_to_send[i]->data;
+				next_ptr = frame_to_send[i]->next;
+				frame_to_send[i]->size = 0;
+				frame_to_send[i]->data = NULL;
+				frame_to_send[i]->next = NULL;
+				frame_to_send[i] = next_ptr;
+                
+				break;
+			}
+		}
+		if (data_ptr) kfree(data_ptr);
+	} while (next_ptr);
+    
+	spin_unlock_irqrestore(&frame_nodes_lock, lock_flag);
+}
+
+static int ts_ldisc_tx_looper(void *param)
+{
+	int i, res;
+	u8 *data_ptr;
+	int data_size;
+	void *next_ptr;
+    
+	while (!kthread_should_stop()) {
+		res = 0;
+		data_size = 0;
+		data_ptr = NULL;
+        
+		spin_lock_irqsave(&frame_nodes_lock, lock_flag);
+        
+		for (i = 0; i < TS0710MAX_PRIORITY_NUMBER; i++) {
+			if (frame_to_send[i] != NULL) {
+				data_ptr = frame_to_send[i]->data;
+				data_size = frame_to_send[i]->size;
+				next_ptr = frame_to_send[i]->next;
+				frame_to_send[i]->size = 0;
+				frame_to_send[i]->data = NULL;
+				frame_to_send[i]->next = NULL;
+				frame_to_send[i] = next_ptr;
+				/*  printk("\nTS0710:ts_ldisc_tx_looper:send to dlci=%d",i);*/
+				break;
+			}
+		}
+		spin_unlock_irqrestore(&frame_nodes_lock, lock_flag);
+        
+		if ((data_size > 0) && (data_ptr != NULL)) {
+			if (ipc_tty != NULL)
+				res = ipc_tty->ops->write(ipc_tty, data_ptr, data_size);
+			else
+				TS0710_PRINTK("TTY NULL pointer\n");
+            
+			if (res != data_size)
+				printk("\nTS0710:ts_ldisc_tx_looper:data_size=%d,res=%d\n",
+				       data_size,
+				       res);
+			kfree(data_ptr);
+		}
+		down(&spi_write_sema);
+	}
+	return 0;
+}
 
 static int ts_ldisc_open(struct tty_struct *tty)
 {
-    struct mux_data *disc_data;
-    int i;
-
-    tty->receive_room = TS0710MUX_MAX_RECEIVE_ROOM;
-
-    disc_data = kzalloc(sizeof(struct mux_data), GFP_KERNEL);
-
-    disc_data->state = OUT_OF_FRAME;
-    disc_data->framelen = 0;
-
-    tty->disc_data = disc_data;
-
-    for (i=0; i<TS0710_MAX_CHANNELS; i++)
-    {
-        sema_init(&ts0710_connection.dlci[i].tx.write_sema, 0);
-    }
-
-    ipc_tty = tty;
-
-    spin_lock_init(&tx_lock);
-    mux_tx_queues_init();
-    ts0710_reset_dlci_priority();
-
-    all_flow_off_from_modem = 0;
-    // Keep it always locked
-    MUX_DBG(5,"ts_ldisc_open executed\n");
-
-    return 0;
+	struct mux_data *disc_data;
+	int i;
+    
+	tty->receive_room = 65536;
+    
+	disc_data = kzalloc(sizeof(struct mux_data), GFP_KERNEL);
+    
+    //WBT #196220
+	if (disc_data == NULL) {
+		TS0710_PRINTK("ldisc_open fail : Memory Allocation fail\n");
+		return -ENOMEM;
+	}
+	disc_data->state = OUT_OF_FRAME;
+	disc_data->chunk_size = 0;
+    
+	tty->disc_data = disc_data;
+    
+    
+	for (i = 0; i < 32; i++) {
+		spi_write_data_sema[i].lock = __SPIN_LOCK_UNLOCKED(spi_write_data_sema[i].lock);
+		spi_write_data_sema[i].count = 0;
+		spi_write_data_sema[i].wait_list.next = &(spi_write_data_sema[i].wait_list);
+		spi_write_data_sema[i].wait_list.prev = &(spi_write_data_sema[i].wait_list);
+	}
+    
+	if (write_task == NULL)
+		spin_lock_init(&frame_nodes_lock);
+    
+	nodes_init();
+	ts0710_reset_dlci_priority();
+	spi_data_recieved.tty = NULL;
+	spi_data_recieved.data = NULL;
+	spi_data_recieved.flags = NULL;
+	spi_data_recieved.size = 0;
+	spi_data_recieved.updated = 0;
+    
+	if (write_task == NULL)
+		write_task = kthread_run(ts_ldisc_tx_looper, NULL, "%s", "ts_ldisc_tx_looper");
+    
+	if (write_task == NULL)
+		TS0710_DEBUG("ts_ldisc_open WRITE_THREAD is not started!!!\n");
+    
+	TS0710_PRINTK("ts_ldisc_open executed\n");
+	ipc_tty = tty;
+    
+	return 0;
 }
 
-static void ts_ldisc_receive_buf(struct tty_struct *tty, const u8 *data, char *flags, int size)
-{
-#ifdef MSPI2MSPI_TEST
-    if(mspitest_enable == true)
-    {
-        if(mspitest_rx_enable == true)
-        {
-            spin_lock_bh(&mspi2mspi_lock);
-            mspi2mspi_rx_counter += size;
-            spin_unlock_bh(&mspi2mspi_lock);
-        }
-        return;
-    }
-#endif//MSPI2MSPI_TEST
-
-    if(mux_cbn_splt_start_frame != NULL)
-    {
-        u8 *data_tmp = NULL;
-        int size_tmp = size;
-        data_tmp = kmalloc(mux_cbn_splt_frame_len + size, GFP_KERNEL);
-        if(data_tmp != NULL)
-        {
-            memcpy(data_tmp,mux_cbn_splt_start_frame,mux_cbn_splt_frame_len);
-            memcpy(data_tmp + mux_cbn_splt_frame_len,data,size);
-            size_tmp += mux_cbn_splt_frame_len;
-            kfree(mux_cbn_splt_start_frame);
-            mux_cbn_splt_start_frame = NULL;
-            mux_cbn_splt_frame_len = 0;
-            mux_rx_raw_data(tty, data_tmp, flags, size_tmp);
-            kfree(data_tmp);
-        }
-        else
-        {
-            MUX_ERR("RX MEM ALLOC for frame failed - previous part was released\n");
-            kfree(mux_cbn_splt_start_frame);
-            mux_cbn_splt_start_frame = NULL;
-            mux_cbn_splt_frame_len = 0;
-            mux_rx_raw_data(tty, data, flags, size);
-        }
-    }
-    else
-    {
-        mux_rx_raw_data(tty, data, flags, size);
-    }
-
-    tty_unthrottle(tty);
-}
-
-
-/*
-    RECOVERY_MODE
-        description : This mode is used to recover the at command pending state
-                     Step.1 : CP reset
-                     Step.2 : Close all mux channels
-                     Step.3 : Wait until CP is rebooting for 5 seconds
-*/
 static void ts_ldisc_close(struct tty_struct *tty)
 {
-    struct tty_struct *mspi_tty = ipc_tty;
-    MUX_DBG(7, "%s called \n", __FUNCTION__);
-
-    all_flow_off_from_modem = 0;
-
-#ifdef RECOVERY_MODE
-    {
-        u8 i;
-
-        ts_ldisc_called = 1;
-
-#ifdef ENABLE_MUX_WAKE_LOCK
-        wake_lock_timeout(&s_wake_lock, MUX_WAKELOCK_TIME);
-#endif
-
-
-        for(i = 0; i < TS0710MAX_PRIORITY_NUMBER ; i++)
-        {
-            mux_queue_flush(&mux_tx_q[i], mux_rx_queue_flush_cb);
-        }
-
-        if(mux_cbn_splt_start_frame != NULL)
-        {
-            kfree(mux_cbn_splt_start_frame);
-            mux_cbn_splt_start_frame = NULL;
-        }
-        mux_cbn_splt_frame_len = 0;
-
-        up(&ipc_write_completion);
-        down_trylock(&ipc_write_completion);
-
-        for(i = 0; i < TS0710_MAX_CHANNELS; i++)
-        {
-            if(mux_table[i] != NULL)
-            {
-                tty_hangup(mux_table[i]);
-            }
-
-            mux_flush_dlci(i);
-        }
-
-        flush_workqueue(mux_tx_wq);
-
-        ipc_tty = NULL;
-
-
-        tty_driver_flush_buffer(mspi_tty);
-
-        ts_ldisc_flush_buffer(tty);
-        for(i = 0; i < TS0710_MAX_CHANNELS; i++)
-        {
-            mux_rx_destroy_queue(i);
-        }
-
-        ts0710_upon_disconnect();
-        tty_ldisc_flush(tty);
-        if(tty->disc_data)
-        {
-            kfree(tty->disc_data);
-            tty->disc_data = NULL;
-        }
-
-        MUX_ERR("Start RIL Recorvery Mode ...Restart QCT Modem\n");
-
-        gpio_request(GPIO_CP_RESET, "ifx_reset_n");
-        tegra_gpio_enable(GPIO_CP_RESET);
-        gpio_direction_output(GPIO_CP_RESET, 1);
-
-        UNMUX_DBG("GPIO_CP_RESET: %d", gpio_get_value(GPIO_CP_RESET));
-
-        gpio_set_value(GPIO_CP_RESET, 1);
-        UNMUX_DBG("GPIO_CP_RESET: %d", gpio_get_value(GPIO_CP_RESET));
-
-        mdelay(200);
-        gpio_set_value(GPIO_CP_RESET, 0);
-        UNMUX_DBG("GPIO_CP_RESET: %d", gpio_get_value(GPIO_CP_RESET));
-
-        mdelay(200);
-        gpio_set_value(GPIO_CP_RESET, 1); 
-        UNMUX_DBG("GPIO_CP_RESET: %d", gpio_get_value(GPIO_CP_RESET));
-        
-        ts_ldisc_called = 0;
-        MUX_ERR("End recovery mode!!\n");
-    }
-#endif //RECOVERY_MODE
+	TS0710_PRINTK("ts_ldisc_close start\n");
+    
+	ts0710_upon_disconnect();
+	clear_nodes();
+	tty_ldisc_flush(tty);
+    
+	kfree(tty->disc_data);
+    
+	ipc_tty = NULL;
 }
 
 static void ts_ldisc_wake(struct tty_struct *tty)
 {
-    MUX_DBG(8,"Write to MSPI wake up\n");
-    clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
-    up(&ipc_write_completion);
+	printk("ts wake\n");
 }
 
 static ssize_t ts_ldisc_read(struct tty_struct *tty, struct file *file,
                              unsigned char __user *buf, size_t nr)
 {
-    return -EOPNOTSUPP;
+	return 0;
 }
 
 static ssize_t ts_ldisc_write(struct tty_struct *tty, struct file *file,
                               const unsigned char *data, size_t count)
 {
-    return -EOPNOTSUPP;
+	return 0;
 }
 
-static void ts_ldisc_flush_buffer(struct tty_struct *tty)
-{
-    int i;
-
-    MUX_DBG(9, "flush buffer on MUX");
-
-    for (i = 0; i < TS0710_MAX_CHANNELS; i++)
-    {
-        mux_rx_flush_queue(i);
-    }
-
-    for(i = 0; i < TS0710_MAX_CHANNELS; i++)
-    {
-        if(mux_table[i] != NULL)
-            mux_flush_buffer(mux_table[i]);
-    }
-}
-
-static int ts_ldisc_ioctl(struct tty_struct *tty, struct file * file,
+static int ts_ldisc_ioctl(struct tty_struct *tty, struct file *file,
                           unsigned int cmd, unsigned long arg)
 {
-    int retval = 0;
-
-    switch (cmd)
-    {
-#ifdef MSPI2MSPI_TEST
-        case TIOCMSPI2MSPI_T1:
-            mspitest_tx_enable = true;
-            mspitest_rx_enable = true;
-            mspitest_enable = true;
-            if (arg) mspitest_frame_size = (int) arg;
-            MUX_DBG(0,"MSPITEST STARTED in -t%d mode\n",cmd-0x5503);
-            queue_work(mux_tx_wq, &mux_tx_work);
-            break;
-        case TIOCMSPI2MSPI_T2:
-            mspitest_tx_enable = false;
-            mspitest_rx_enable = true;
-            mspitest_enable = true;
-            if (arg) mspitest_frame_size = (int) arg;
-            MUX_DBG(0,"MSPITEST STARTED in -t%d mode\n",cmd-0x5503);
-            queue_work(mux_tx_wq, &mux_tx_work);
-            break;
-        case TIOCMSPI2MSPI_T3:
-            mspitest_tx_enable = true;
-            mspitest_rx_enable = false;
-            mspitest_enable = true;
-            if (arg) mspitest_frame_size = (int) arg;
-            MUX_DBG(0,"MSPITEST STARTED in -t%d mode\n",cmd-0x5503);
-            queue_work(mux_tx_wq, &mux_tx_work);
-            break;
-        case TIOCMSPI2MSPISTOP:
-            mspitest_rx_enable = false;
-            mspitest_tx_enable = false;
-            mspitest_enable = false;
-            kfree(mspi_data);
-            mspi_data = NULL;
-            break;
-        case TIOCGSTATMSPI:
-            {
-                struct mspi2mspi_stat stat;
-                struct timespec ts;
-                spin_lock_bh(&mspi2mspi_lock);
-                stat.tx_counter = mspi2mspi_tx_counter;
-                stat.rx_counter = mspi2mspi_rx_counter;
-                spin_unlock_bh(&mspi2mspi_lock);
-                ts = current_kernel_time();
-                stat.timestamp = ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-
-                if (copy_to_user((void*)arg, &stat, sizeof stat))
-                    return -EFAULT;
-            }
-            break;
-#endif//MSPI2MSPI_TEST
-
-        case TCFLSH:
-            tty_perform_flush(tty, arg);
-            break;
-        default:
-            MUX_DBG(0,"ts_ldisc_ioctl: No such ioctl %x", cmd);
-            return -ENOIOCTLCMD;
-            break;
-    }
-    return retval;
+	return -1;
 }
 
 static unsigned int ts_ldisc_poll(struct tty_struct *tty,
                                   struct file *filp, poll_table *wait)
 {
-    unsigned int mask = 0;
-    u8 dlci = tty->index;
-
-    MUX_TRACE("dlci = %d", dlci);
-
-    poll_wait(filp, &tty->read_wait, wait);
-    poll_wait(filp, &tty->write_wait, wait);
-
-    if (test_bit(TTY_OTHER_CLOSED, &tty->flags) ||
-        tty_hung_up_p(filp) ||
-        ts0710_connection.dlci[dlci].state == DISCONNECTED)
-        mask |= POLLHUP;
-
-    if(!tty_is_writelocked(tty) && tty_write_room(tty) > 0)
-        mask |= POLLOUT | POLLWRNORM;
-
-    if(mux_queue_count(&mux_rx_q[dlci]) != 0)
-        mask |= POLLIN | POLLRDNORM;
-
-    MUX_TRACE("mask = %X", mask);
-
-    return mask;
+	return 0;
 }
 
-static int ts_ldisc_hangup(struct tty_struct *tty)
-{
-    ts_ldisc_close(tty);
-    return 0;
-}
-
-static void ts_ldisc_set_termios(struct tty_struct *tty, struct ktermios * old)
-{
-    UNUSED_PARAM(old);
-
-    MUX_DBG(9, "termios changed for pts%d", tty->index);
-}
-
-/*--------------------------------------------------------------------*/
-/* END Line Discipline routines                                       */
-/*--------------------------------------------------------------------*/
-
-/*--------------------------------------------------------------------*/
-/* Module routines                                                    */
-/*--------------------------------------------------------------------*/
 
 struct tty_operations mux_ops = {
-    .open               = mux_open,
-    .close              = mux_close,
-    .write              = mux_write,
-    .write_room         = mux_write_room,
-    .chars_in_buffer    = mux_chars_in_buffer,
-    .throttle           = mux_throttle,
-    .unthrottle         = mux_unthrottle,
-    .flush_buffer       = mux_flush_buffer,
-    .hangup             = mux_hangup,
-    .set_ldisc          = mux_set_ldisc,
+	.open			= mux_open,
+	.close			= mux_close,
+	.write			= mux_write,
+	.write_room		= mux_write_room,
+	.flush_buffer		= mux_flush_buffer,
+	.chars_in_buffer	= mux_chars_in_buffer,
+	.throttle		= mux_throttle,
+	.unthrottle		= mux_unthrottle,
 };
 
 static struct tty_ldisc_ops ts_ldisc = {
-    .owner              = THIS_MODULE,
-    .magic              = TTY_LDISC_MAGIC,
-    .name               = MUX_DRIVER_NAME,
-    .open               = ts_ldisc_open,
-    .close              = ts_ldisc_close,
-    .read               = ts_ldisc_read,
-    .write              = ts_ldisc_write,
-    .poll               = ts_ldisc_poll,
-    .receive_buf        = ts_ldisc_receive_buf,
-    .write_wakeup       = ts_ldisc_wake,
-    .ioctl              = ts_ldisc_ioctl,
-    .flush_buffer       = ts_ldisc_flush_buffer,
-    .hangup             = ts_ldisc_hangup,
-    .set_termios        = ts_ldisc_set_termios
+	.owner		= THIS_MODULE,
+	.magic		= TTY_LDISC_MAGIC,
+	.name		= "ts07.10",
+	.open		= ts_ldisc_open,
+	.close		= ts_ldisc_close,
+	.read		= ts_ldisc_read,
+	.write		= ts_ldisc_write,
+	.poll		= ts_ldisc_poll,
+	.receive_buf	= ts_ldisc_rx,
+	.write_wakeup	= ts_ldisc_wake,
+	.ioctl		= ts_ldisc_ioctl,
 };
+
 
 static int __init mux_init(void)
 {
-    u8 j;
-    int result;
-
-#ifdef MUX_DRV_DEBUG_FS_LEVEL
-    create_mux_proc_dbg_file();
-#endif
-
-
-    UNMUX_DBG("initializing mux with %d channels\n", TS0710_MAX_CHANNELS);
-
-    ts0710_init();
-
-    mux_driver = alloc_tty_driver(TS0710_MAX_CHANNELS);
-
-    if (!mux_driver)
-        return -ENOMEM;
-
-    mux_driver->owner       = THIS_MODULE;
-    mux_driver->driver_name = MUX_DRIVER_NAME;
-    mux_driver->name        = "pts";
-    mux_driver->major       = TS0710MUX_MAJOR;
-    mux_driver->minor_start = TS0710MUX_MINOR_START;
-    mux_driver->type        = TTY_DRIVER_TYPE_SERIAL;
-    mux_driver->subtype     = SERIAL_TYPE_NORMAL;
-    mux_driver->flags       = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
-
-
-    mux_driver->init_termios            = tty_std_termios;
-    mux_driver->init_termios.c_iflag    = 0;
-    mux_driver->init_termios.c_oflag    = 0;
-    mux_driver->init_termios.c_cflag    = B921600 | CS8 | CREAD;
-    mux_driver->init_termios.c_lflag    = 0;
-
-    tty_set_operations(mux_driver, &mux_ops);
-
-    if ((result=tty_register_driver(mux_driver)) < 0)
-    {
-        MUX_ERR("tty_register_driver returns %d",result);
-        panic("TS0710 :Couldn't register mux driver");
-    }
-
-    for (j = 0; j < TS0710_MAX_CHANNELS; j++)
-        tty_register_device(mux_driver, j, NULL);
-
-    INIT_WORK(&mux_tx_work,mux_tx_handle_work);
-    mux_tx_wq = create_singlethread_workqueue("mux_tx"); //create_singlethread_workqueue
-
-#ifdef N_TS0710
-    if ((result=tty_register_ldisc(N_TS0710, &ts_ldisc)) < 0)
-#else
-    if ((result=tty_register_ldisc(N_TS2710, &ts_ldisc)) < 0)
-#endif
-    {
-        MUX_ERR("oops. cant register ldisc\n");
-    }
-#ifdef ENABLE_MUX_WAKE_LOCK
-    wake_lock_init(&s_wake_lock, WAKE_LOCK_SUSPEND, "mux_wake");
-#endif
-
-    return 0;
+	u8 j;
+	int result;
+    
+	NR_MUXS = TS0710MAX_CHANNELS;
+	iscmdtty = NULL;
+	mux_send_info_idx = TS0710MAX_CHANNELS;
+    
+	TS0710_PRINTK("initializing mux with %d channels\n", NR_MUXS);
+    
+	ts0710_init();
+    
+	for (j = 0; j < NR_MUXS; j++) {
+		mux_send_info_flags[j] = 0;
+		mux_send_info[j] = 0;
+		mux_recv_info_flags[j] = 0;
+		mux_recv_info[j] = 0;
+	}
+	mux_send_info_idx = NR_MUXS;
+	mux_recv_queue = NULL;
+	mux_recv_flags = 0;
+    
+	mux_driver = alloc_tty_driver(NR_MUXS);
+	if (!mux_driver)
+		return -ENOMEM;
+    
+	mux_driver->owner = THIS_MODULE;
+	mux_driver->driver_name = "ts0710mux";
+	mux_driver->name = "pts";
+	mux_driver->major = TS0710MUX_MAJOR;
+	mux_driver->minor_start = TS0710MUX_MINOR_START;
+	mux_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	mux_driver->subtype = SERIAL_TYPE_NORMAL;
+	mux_driver->flags = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW |
+    TTY_DRIVER_DYNAMIC_DEV;
+    
+	mux_driver->init_termios = tty_std_termios;
+	mux_driver->init_termios.c_iflag = 0;
+	mux_driver->init_termios.c_oflag = 0;
+	mux_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
+	mux_driver->init_termios.c_lflag = 0;
+    
+	/* mux_driver.ttys = mux_table; */
+	mux_driver->termios = mux_termios;
+	mux_driver->termios_locked = mux_termios_locked;
+	/* mux_driver.driver_state = mux_state; */
+	mux_driver->other = NULL;
+    
+	tty_set_operations(mux_driver, &mux_ops);
+    
+	/* FIXME: No panic() here */
+	result = tty_register_driver(mux_driver);
+	if (result != 0) {
+		printk("TS0710:tty_register_driver returns %d", result);
+		panic("TS0710 :Couldn't register mux driver");
+	}
+    
+	for (j = 0; j < NR_MUXS; j++)
+		tty_register_device(mux_driver, j, NULL);
+    
+	result = tty_register_ldisc(N_TS0710, &ts_ldisc);
+	if (result != 0)
+		printk("TS0710 :oops. cant register ldisc\n");
+    
+    // CP Reset & Response halt Recovery
+	for (j = 0; j < TS0710MAX_CHANNELS; j++)
+		mux_table[j] = NULL;
+    // CP Reset & Response halt Recovery
+    
+	return 0;
 }
 
 static void __exit mux_exit(void)
 {
-    dlci_struct             *dlci_data;
-    int                     i;
-    MUX_DBG(7, "%s called \n", __FUNCTION__);
-#ifdef MUX_DRV_DEBUG_FS_LEVEL
-    remove_mux_proc_dbg_file();
-#endif
-
-
-    for (i = 0; i < TS0710_MAX_CHANNELS; i++)
-    {
-        mux_rx_flush_queue(i);
-        mux_rx_destroy_queue(i);
-    }
-
-    for(i = 0; i < TS0710MAX_PRIORITY_NUMBER ; i++)
-    {
-        mux_queue_flush(&mux_tx_q[i], mux_rx_queue_flush_cb);
-    }
-
-    spin_lock_bh(&tx_lock);
-    frame_usage = 0;
-    for(i = 0; i < TS0710_MAX_CHANNELS; i++)
-    {
-        dlci_data = &ts0710_connection.dlci[i];
-        dlci_data->tx.frame_count = 0;
-        dlci_data->tx.chars_in_buffer = 0;
-        dlci_data->tx.wakeup_flag = 0;
-    }
-    spin_unlock_bh(&tx_lock);
-
-    if (mux_tx_wq != NULL)
-    {
-        ts_ldisc_called = 1;
-        up(&ipc_write_completion);
-        down_trylock(&ipc_write_completion);
-        flush_workqueue(mux_tx_wq);
-        destroy_workqueue(mux_tx_wq);
-        ts_ldisc_called = 0;
-        mux_tx_wq = NULL;
-    }
-
-    for (i = 0; i < TS0710_MAX_CHANNELS; i++)
-        tty_unregister_device(mux_driver, i);
-
-    if (tty_unregister_driver(mux_driver))
-        panic("Couldn't unregister mux driver");
-
-#ifdef ENABLE_MUX_WAKE_LOCK
-    wake_lock_destroy(&s_wake_lock);
-#endif
+	u8 j;
+    
+    
+	mux_send_info_idx = NR_MUXS;
+	mux_recv_queue = NULL;
+	for (j = 0; j < NR_MUXS; j++) {
+		if ((mux_send_info_flags[j]) && (mux_send_info[j]))
+			kfree(mux_send_info[j]);
+		mux_send_info_flags[j] = 0;
+		mux_send_info[j] = 0;
+        
+		if ((mux_recv_info_flags[j]) && (mux_recv_info[j]))
+			free_mux_recv_struct(mux_recv_info[j]);
+		mux_recv_info_flags[j] = 0;
+		mux_recv_info[j] = 0;
+	}
+    
+	for (j = 0; j < NR_MUXS; j++)
+		tty_unregister_device(mux_driver, j);
+    
+	if (tty_unregister_driver(mux_driver))
+		panic("Couldn't unregister mux driver");
 }
-
-/*--------------------------------------------------------------------*/
-/* END Module routines                                                */
-/*--------------------------------------------------------------------*/
 
 module_init(mux_init);
 module_exit(mux_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Harald Welte <laforge@openezx.org>, Extentded version - Teleca ");
-MODULE_DESCRIPTION("TS 07.10 Multiplexer - Extended version");
+MODULE_AUTHOR("Harald Welte <laforge@openezx.org>");
+MODULE_DESCRIPTION("TS 07.10 Multiplexer");

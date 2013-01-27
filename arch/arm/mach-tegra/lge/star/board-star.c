@@ -63,6 +63,7 @@
 //                                             
 //                                                                   
 #include <linux/lbee9qmb-rfkill.h>
+#include "star_devices.h"
 //             
 
 //                                                            
@@ -161,6 +162,7 @@ static void __init star_uart_init(void)
 	/* name		parent		rate		enabled */
 static __initdata struct tegra_clk_init_table star_clk_init_table[] = {
 	{ "blink",	"clk_32k",	32768,		true},
+    { "sbc1",	"pll_p",	96000000,	true},
 //20120525 sgkim@mobii.co.kr Motor PWM change [S]
 	{ "pwm",	"clk_m",	12000000,		false},
 //20120525 sgkim@mobii.co.kr Motor PWM change [E]
@@ -328,14 +330,42 @@ static struct platform_device *star_devices[] __initdata = {
 	&tegra_pwfm3_device,	//20120525 sgkim@mobii.co.kr Motor PWM change : tegra_pwfm0_device -> tegra_pwfm3_device
 #endif
 #if defined(CONFIG_BD_ADDRESS)
-	&bd_address_device,		//                                                            
+	&bd_address_device,		//
 #endif
-
+    
 };
 
-#if defined(CONFIG_LGE_BROADCAST_TDMB)
+static struct platform_device *star_spi_devices[] __initdata = {
+	&tegra_spi_slave_device1,
+};
 
-struct spi_clk_parent spi_dmb_clk[] = {
+static struct spi_board_info __initdata star_spi_board_devices[] = {
+#ifdef CONFIG_SPI_MDM6600
+	{
+		.modalias = "mdm6600",
+		.bus_num = 0,
+		.chip_select = 0,
+		.mode = SPI_MODE_1,
+		.max_speed_hz = 24000000,
+		.controller_data = &tegra_spi_slave_device1,
+		.irq = 0,
+		//	.platform_data = &mdm6600
+	},
+#else /* CONFIG_SPI_MDM6600 */
+    {
+		.modalias = "ifxn721",
+		.bus_num = 0,
+		.chip_select = 0,
+		.mode = SPI_MODE_1,
+		.max_speed_hz = 24000000,
+		//.controller_data	= &tegra_spi_slave_device1,
+		.irq = 277,//0,//GPIO_IRQ(TEGRA_GPIO_PO5),
+		//	.platform_data = &ifxn721
+	},
+#endif /* CONFIG_SPI_MDM6600 */
+};
+
+static struct spi_clk_parent spi_parent_clk[] = {
 	[0] = {.name = "pll_p"},
 #ifndef CONFIG_TEGRA_PLLM_RESTRICTED
 	[1] = {.name = "pll_m"},
@@ -345,55 +375,41 @@ struct spi_clk_parent spi_dmb_clk[] = {
 #endif
 };
 
-static struct tegra_spi_device_controller_data star_spi_bus2_controller_data = {
-        .is_hw_based_cs = true,
-        .cs_setup_clk_count = 0,
-        .cs_hold_clk_count = 0,
-};
-
-static struct spi_board_info __initdata spi_bus2_devices_info[] = {
-	{
-		.modalias = "tdmb_lg2102",
-		.bus_num = 1,
-		.chip_select = 0,
-		.mode = SPI_MODE_0,
-		.max_speed_hz = (6000*1000),
-		.controller_data = &star_spi_bus2_controller_data,
-		.irq = 0, // setting in broadcast_lg2102.c
-	},
-};
-
-static struct tegra_spi_platform_data dmb_spi_pdata = {
+static struct tegra_spi_platform_data star_spi_pdata = {
 	.is_dma_based		= true,
 	.max_dma_buffer		= (16 * 1024),
 	.is_clkon_always	= false,
 	.max_rate		= 48000000,
 };
 
-static void star_dmb_init(void)
+static void __init star_spi_init(void)
 {
 	int i;
-	struct clk* c;
-	
-	for(i=0; i<ARRAY_SIZE(spi_dmb_clk); ++i) {
-		c = tegra_get_clock_by_name(spi_dmb_clk[i].name);
-		if(IS_ERR_OR_NULL(c)){
-			pr_err("DMB Not able to get the clock for %s\n",
-				spi_dmb_clk[i].name);
+	struct clk *c;
+	struct board_info board_info;
+    
+	tegra_get_board_info(&board_info);
+    
+	for (i=0; i < ARRAY_SIZE(spi_parent_clk); ++i) {
+		c = tegra_get_clock_by_name(spi_parent_clk[i].name);
+		if (IS_ERR_OR_NULL(c)) {
+			pr_err("Not able to get the clock for %s\n",
+                   spi_parent_clk[i].name);
 			continue;
 		}
-		spi_dmb_clk[i].parent_clk = c;
-		spi_dmb_clk[i].fixed_clk_rate = clk_get_rate(c);
+		spi_parent_clk[i].parent_clk = c;
+		spi_parent_clk[i].fixed_clk_rate = clk_get_rate(c);
 	}
-	dmb_spi_pdata.parent_clk_list = spi_dmb_clk;
-	dmb_spi_pdata.parent_clk_count = ARRAY_SIZE(spi_dmb_clk);
-	tegra_spi_device2.dev.platform_data = &dmb_spi_pdata;
-	
-	//platform_add_devices(dmb_spi_devices, ARRAY_SIZE(dmb_spi_devices));
-	platform_device_register(&tegra_spi_device2);
-	spi_register_board_info(spi_bus2_devices_info, ARRAY_SIZE(spi_bus2_devices_info));
+	star_spi_pdata.parent_clk_list = spi_parent_clk;
+	star_spi_pdata.parent_clk_count = ARRAY_SIZE(spi_parent_clk);
+    
+	tegra_spi_slave_device1.dev.platform_data = &star_spi_pdata;
+    
+	platform_add_devices(star_spi_devices, ARRAY_SIZE(star_spi_devices));
+    
+	spi_register_board_info(star_spi_board_devices,
+                            ARRAY_SIZE(star_spi_board_devices));
 }
-#endif /*                      */
 
 static void __init tegra_star_init(void)
 {
@@ -423,14 +439,11 @@ static void __init tegra_star_init(void)
 #endif
 	star_power_off_init();
 	star_emc_init();
-	star_baseband_init();
+    star_spi_init();
 #ifdef CONFIG_BT_BLUESLEEP
 	tegra_setup_bluesleep();
 #endif
-	tegra_release_bootloader_fb();
-#if defined(CONFIG_LGE_BROADCAST_TDMB)
-	star_dmb_init();
-#endif /*                      */
+	tegra_release_bootloader_fb();                
 #if defined(CONFIG_MACH_STAR)
 	star_muic_init();
 #endif

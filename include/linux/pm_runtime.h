@@ -82,6 +82,11 @@ static inline bool pm_runtime_suspended(struct device *dev)
 		&& !dev->power.disable_depth;
 }
 
+static inline bool pm_runtime_status_suspended(struct device *dev)
+{
+	return dev->power.runtime_status == RPM_SUSPENDED;
+}
+
 static inline bool pm_runtime_enabled(struct device *dev)
 {
 	return !dev->power.disable_depth;

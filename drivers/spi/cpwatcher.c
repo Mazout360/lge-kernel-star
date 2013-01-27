@@ -1,412 +1,314 @@
-
 /*
- * X2 - CP Watcher Driver
+ * drivers/startablet/cpwatcher.c
  *
- * Copyright (C) 2010 LGE, Inc.
+ * Star Tablet CP watcher driver
  *
- *
- * modified: Wonseok Yang <ws.yang@lge.com>
+ * Copyright (c) 2011, LG Electronics Corporation.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/delay.h>
+#include <linux/types.h>
+
+#include <linux/kernel.h>
+#include <linux/serial.h>
+#include <linux/errno.h>
+#include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/err.h>
-#include <linux/syscalls.h>
+#include <linux/tty.h>
+#include <linux/tty_flip.h>
+#include <linux/fcntl.h>
+#include <linux/string.h>
+#include <linux/major.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/semaphore.h>
+
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+#include <linux/platform_device.h>
+#include <linux/device.h>
 #include <linux/gpio.h>
-#include <mach/hardware.h>
+#include <linux/delay.h>
 #include <mach/gpio-names.h>
 #include <mach/hardware.h>
+#include <linux/uaccess.h>
 #include <linux/workqueue.h>
-#include <linux/input.h>
-#include <linux/slab.h>
+#endif //LGE_FEATURE_CP_HALT_DETECTION
 
+#define DEBUG 1
 
-#ifndef CONFIG_MACH_STAR_P999
-#define IFX_CP_CRASH
-#endif
-#ifdef IFX_CP_CRASH
-#define GPIO_IFX_CP_CRASH       TEGRA_GPIO_PR1
-#endif
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+#define GPIO_IFX_RESET_1V8_N  TEGRA_GPIO_PV0
 
-#define GPIO_IFX_CP_RESET       TEGRA_GPIO_PV3
+static struct work_struct work_reset;
+static int reset_count = 0;
+#endif //LGE_FEATURE_CP_HALT_DETECTION
 
-#define CPW_IFX_TEGRA_EDGE_TRIGGER
+static struct workqueue_struct *workqueue;
+static struct work_struct work;
 
-//#define CPW_DEBUG_MODE
-#ifdef CPW_DEBUG_MODE
-#define CPW_DEBUG(format, args...) printk("[CPW] : %s (%d line): " format "\n", __FUNCTION__, __LINE__, ## args)
-#else
-#define CPW_DEBUG(format, args...) do { } while(0)
-#endif
+static struct tty_driver *cpwatcher_driver;
 
-#define CPW_PRINTK(format, args...) printk("[CPW] : %s (%d line): " format "\n", __FUNCTION__, __LINE__, ## args)
-
-/* Forward scancode to Framework   */
-/* frameworks\base\policy\src\com\android\internal\policy\impl\PhoneWindowManager.java */
-#define EVENT_KEY KEY_F24 /* 194 */
-
-
-#define CP_RESET_TRUE       0
-#define CP_CRASH_TRUE       1
-
-typedef struct  CpwatcherDeviceRec{
-    struct input_dev *input;
-
-    unsigned int ifx_cp_reset_irq;    
-#ifdef IFX_CP_CRASH  
-    unsigned int ifx_cp_crash_irq;
-#endif  
-} CpwatcherDevice;
-
-static CpwatcherDevice  s_cpwatcher;
-
-static struct delayed_work work;
-
-static struct platform_device cp_device = { 
-            .name       = "cpwatcher",
-            .id         = -1,
+struct watcher_struct {
+    struct tty_struct	*tty;
+	spinlock_t	lock;
+    int open_count;
 };
+static struct watcher_struct watcher;
+static DEFINE_SEMAPHORE(watcher_sema);
 
-void disable_ifx_irq(void)
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+static struct watcher_struct reporter;
+static int is_reset_requested = 0;
+
+static DEFINE_SEMAPHORE(reporter_sema);
+
+extern void modem_reset(void);
+static void do_cp_reset_internal(struct work_struct *work)
 {
-
-    CPW_PRINTK("IFX modem is going down..........\n");
-
-    if (s_cpwatcher.ifx_cp_reset_irq  >= 0) 
-    {
-        free_irq(s_cpwatcher.ifx_cp_reset_irq, (void*)&s_cpwatcher);
-        CPW_PRINTK("IFX modem is going down: Free irq for cp reset...\n");
-    }
-#ifdef IFX_CP_CRASH
-    if (s_cpwatcher.ifx_cp_crash_irq  >= 0) 
-    {
-        free_irq(s_cpwatcher.ifx_cp_crash_irq, (void*)&s_cpwatcher);
-        CPW_PRINTK("IFX modem is going down: Free irq for cp crash or trap...\n");
-    }   
-#endif
-}
-//EXPORT_SYMBOL(disable_ifx_irq);
-
-static ssize_t ifx_status_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-    int pin_val = 0;
-
-    pin_val = gpio_get_value(GPIO_IFX_CP_RESET);
-
-    return sprintf(buf, "%s\n", ((pin_val)?"IFX On":"IFX Off"));
+    if(DEBUG) printk(KERN_INFO "%s : start, reset_count=%d", __FUNCTION__, reset_count);
+    if(reset_count > 0) return;
+    
+    reset_count++;
+	is_reset_requested = 1;
+	modem_reset();
+	reset_count--;
+    
+    if(DEBUG) printk(KERN_INFO "%s : end", __FUNCTION__);
+    return;
 }
 
-static ssize_t ifx_status_store(struct device *dev, struct device_attribute *sttr,
-                                const char *buf, size_t count)
+int do_cp_reset(void)
 {
-    unsigned long state;
-    int err;
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+    INIT_WORK(&work_reset, do_cp_reset_internal);
+    queue_work(workqueue, &work_reset);
+    
+	return 0;
+}
+EXPORT_SYMBOL_GPL(do_cp_reset);
+#endif //LGE_FEATURE_CP_HALT_DETECTION
 
-    err = strict_strtoul(buf, 0, &state);
-    if (err)
-    {
-        CPW_PRINTK(" err\n");   
-        return err;
-    }
-
-    if (state == 0) 
-    {
-        disable_ifx_irq();
-    }
-
-    return err ?: count;
+static void notify_to_watcher(struct work_struct *work)
+{
+    const char* cprestart = "+RESTART\r\n";
+    int data_size = strlen(cprestart);
+    
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+	spin_lock_irq(&watcher.lock);
+	if((watcher.tty) && (watcher.tty->ldisc)) {
+	    watcher.tty->ldisc->ops->receive_buf(watcher.tty, cprestart, NULL, data_size);
+        tty_flip_buffer_push(watcher.tty);
+	}
+	spin_unlock_irq(&watcher.lock);
+    
+	return;
 }
 
-//                         
-/* /sys/devices/platform/cpwatcher/ifx_stat 
- 0664 is read by user ..but 0666 is read or write by user */
-static DEVICE_ATTR(ifx_stat, 0664, ifx_status_show, ifx_status_store);
-
-static struct attribute *cpw_attributes[] = {
-    &dev_attr_ifx_stat.attr,
-    NULL,
-};
-
-static const struct attribute_group cpw_group = {
-    .attrs = cpw_attributes,
-};
-
-static void ifx_reset_delayed_work(struct work_struct *wq)
+void cwc_notify_reset(int status)
 {
-
-    int is_cp_reset = 0;
-#ifdef IFX_CP_CRASH  
-    int is_cp_crash=0;
-#endif
-    CPW_DEBUG("start.. \n");
-
-    is_cp_reset = gpio_get_value(GPIO_IFX_CP_RESET);
-        if (is_cp_reset == CP_RESET_TRUE)
-            CPW_PRINTK("is_cp_reset = %d, Auto Reset!! \n", is_cp_reset);
-
-#ifdef IFX_CP_CRASH
-    is_cp_crash = gpio_get_value(GPIO_IFX_CP_CRASH);
-    if (is_cp_crash == CP_CRASH_TRUE)
-        CPW_PRINTK("is_cp_crash = %d, CP Crash \n", is_cp_crash);
-#endif
-
-
-#ifdef IFX_CP_CRASH      
-    if (is_cp_crash == CP_CRASH_TRUE)
-#endif      
-    {
-        CPW_PRINTK( "### CP Crash ### \n");
-        input_report_key(s_cpwatcher.input, EVENT_KEY, 1);
-        input_report_key(s_cpwatcher.input, EVENT_KEY, 0);
-        input_sync(s_cpwatcher.input);     
-        CPW_PRINTK( "input_report_key(): %d\n", EVENT_KEY);
-    }
-#ifdef IFX_CP_CRASH 
-    else 
-    {
-        CPW_DEBUG( ">>>>IFX modem reset = %d, cp_crash = %d\n", is_cp_reset, is_cp_crash);
-        CPW_DEBUG( ">>>>IFX modem was reset!\n");
-    }
-#endif
-
-    CPW_DEBUG("end.. \n");  
-}
-
-
-#ifdef IFX_CP_CRASH
-static irqreturn_t ifx_cp_crash_interrupt_handler(int irq, void *dev_id)
-{
-    int is_cp_crash = 0;
-
-    CPW_DEBUG(" start \n");
-
-    is_cp_crash = gpio_get_value(GPIO_IFX_CP_CRASH);
-    if (is_cp_crash == 0)  //IRQF_TRIGGER_FALLING case is ignore !!!
-    {
-        CPW_DEBUG("IRQF_TRIGGER_FALLING irq is ignored\n");
-        return IRQ_HANDLED;
-    }
-
-    schedule_delayed_work(&work, msecs_to_jiffies(5));
-
-    CPW_DEBUG(" is end \n");
-
-    return IRQ_HANDLED;
-}
-#endif
-
-static irqreturn_t ifx_reset_interrupt_handler(int irq, void *dev_id)
-{
-    CPW_DEBUG(" start \n");
-
-#if defined(CPW_IFX_TEGRA_EDGE_TRIGGER) && !defined(CONFIG_MACH_STAR_P999)
-    {
-        int is_cp_reset = gpio_get_value(GPIO_IFX_CP_RESET);
-        if (is_cp_reset == 1)  //IRQF_TRIGGER_RISING case is ignore !!!
-        {
-            CPW_DEBUG(" IRQF_TRIGGER_RISING irq is ignored\n");
-            return IRQ_HANDLED;
+    if(DEBUG) printk(KERN_INFO "%s, status=%d, is_reset_requested=%d", __FUNCTION__, status, is_reset_requested);
+    
+    if(status) {
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+        if(is_reset_requested)
+            is_reset_requested = 0;
+        else {
+            if(DEBUG) printk(KERN_INFO "%s,  is_reset_requested=%d, so just returned.", __FUNCTION__, is_reset_requested);
+            return;
         }
-    }
-#endif  
-    schedule_delayed_work(&work, msecs_to_jiffies(5));
-
-    CPW_DEBUG("  is end \n");
-
-    return IRQ_HANDLED;
-}
-
-static int __init cpw_probe(struct platform_device *pdev)
-{
-    struct device *dev = &pdev->dev;    
-    int err =0;
-
-    CPW_DEBUG(" start !!! \n");
-
-    memset(&s_cpwatcher, 0x00, sizeof(s_cpwatcher));
-
-    /* Input */
-    s_cpwatcher.input = input_allocate_device();
-    if (!s_cpwatcher.input) 
-    {
-        CPW_PRINTK(" input_allocate_device  is error !!!\n");           
-        goto err_input_device_register_fail;
-    }
-
-    s_cpwatcher.input->name = "cpwatcher";
-    set_bit(EV_KEY, s_cpwatcher.input->evbit);
-    set_bit(EV_SYN, s_cpwatcher.input->evbit);
-    set_bit(EVENT_KEY, s_cpwatcher.input->keybit);
-
-    err = input_register_device(s_cpwatcher.input);
-    if (err) 
-    {
-        CPW_PRINTK(" input_register_device is error !!!\n");        
-        goto err_input_register_device_fail;
+#else
+        return;
+#endif //LGE_FEATURE_CP_HALT_DETECTION
     }
     
-    INIT_DELAYED_WORK(&work, ifx_reset_delayed_work);  
-
-    gpio_request(GPIO_IFX_CP_RESET, "ifx_reset_int_n");
-    tegra_gpio_enable(GPIO_IFX_CP_RESET);
-    gpio_direction_input(GPIO_IFX_CP_RESET);
-    s_cpwatcher.ifx_cp_reset_irq = gpio_to_irq(GPIO_IFX_CP_RESET);   
- 
-#ifdef CPW_IFX_TEGRA_EDGE_TRIGGER     //nvidia dependency
-#ifdef CONFIG_MACH_STAR_P999
-    err = request_irq(s_cpwatcher.ifx_cp_reset_irq, 
-                     ifx_reset_interrupt_handler, 
-                                     (IRQF_TRIGGER_RISING), 
-                                     "ifx_reset_int_n", 
-                                     (void*)&s_cpwatcher);
-#else
-    err = request_irq(s_cpwatcher.ifx_cp_reset_irq, 
-                     ifx_reset_interrupt_handler, 
-                                     (IRQF_TRIGGER_FALLING|IRQF_TRIGGER_RISING), 
-                                     "ifx_reset_int_n", 
-                                     (void*)&s_cpwatcher);
-#endif
-#else
-    err = request_irq(s_cpwatcher.ifx_cp_reset_irq, 
-                     ifx_reset_interrupt_handler, 
-                                     IRQF_TRIGGER_FALLING, 
-                                     "ifx_reset_int_n", 
-                                     (void*)&s_cpwatcher);
-
-#endif
-
-    if(err)
-    {
-        CPW_PRINTK(" Failed: [reset_flag] request_irq for ifx_cp_reset_irq!!! (err:%d)\n", err);
-        free_irq(s_cpwatcher.ifx_cp_reset_irq, (void*)&s_cpwatcher);
-        return -ENOSYS;
-    }
-
-    enable_irq_wake(s_cpwatcher.ifx_cp_reset_irq);
- 
-
-#ifdef IFX_CP_CRASH
-    gpio_request(GPIO_IFX_CP_CRASH, "IFX_CP_CRASH_int_n");
-    tegra_gpio_enable(GPIO_IFX_CP_CRASH);
-    gpio_direction_input(GPIO_IFX_CP_CRASH);
-    s_cpwatcher.ifx_cp_crash_irq = gpio_to_irq(GPIO_IFX_CP_CRASH); 
-
-    err = request_irq(s_cpwatcher.ifx_cp_crash_irq, 
-                    ifx_cp_crash_interrupt_handler, 
-#ifdef CPW_IFX_TEGRA_EDGE_TRIGGER   
-                    (IRQF_TRIGGER_FALLING|IRQF_TRIGGER_RISING), 
-#else
-                    IRQF_TRIGGER_RISING, 
-#endif                  
-                    "IFX_CP_CRASH_int_n", 
-                    (void*)&s_cpwatcher);
-
-    if(err)
-    {
-        CPW_PRINTK(" Failed: [cp_state] request_irq for ifx_cp_crash_irq!!! (err:%d)\n", err);
-        free_irq(s_cpwatcher.ifx_cp_crash_irq, (void*)&s_cpwatcher);   
-        return -ENOSYS;     
-    }
-
-//  enable_irq_wake(s_cpwatcher.ifx_cp_crash_irq);
-#endif
-
-    if (sysfs_create_group(&dev->kobj, &cpw_group)) 
-    {
-
-        CPW_PRINTK(" Failed to create sys filesystem\n");
-        goto err_sysfs_create;      
-    }
-
-    CPW_DEBUG(" CP Watcher Initialization completed\n");
-
-    return 0;
-
-
-err_input_device_register_fail:
-    input_free_device(s_cpwatcher.input);   
-err_input_register_device_fail:
-    input_unregister_device(s_cpwatcher.input); 
-    s_cpwatcher.input = NULL;   
-err_sysfs_create: 
-    return err;
+    INIT_WORK(&work, notify_to_watcher);
+    queue_work(workqueue, &work);
 }
+EXPORT_SYMBOL_GPL(cwc_notify_reset);
 
-
-static int cpw_remove(struct platform_device *pdev)
+static int cwc_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
-     CPW_DEBUG("start\n");
-
-    if (s_cpwatcher.ifx_cp_reset_irq >= 0)
-    {
-        free_irq(s_cpwatcher.ifx_cp_reset_irq, (void*)&s_cpwatcher);    
+	int nRtn = 0;
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+	spin_lock_irq(&reporter.lock);
+    if(tty && (tty->index == 1) && (strncmp(buf, "+CPHALT", count) == 0))
+	{
+        do_cp_reset();
     }
-
-    if (!s_cpwatcher.input) 
-    {
-            input_unregister_device(s_cpwatcher.input);
-            input_free_device(s_cpwatcher.input);
-    }      
-
-    CPW_DEBUG(" success\n");
-
-    return 0;
+	spin_unlock_irq(&reporter.lock);
+    
+	nRtn = count;
+#endif //LGE_FEATURE_CP_HALT_DETECTION
+    
+	return nRtn;
 }
 
+static int cwc_write_room(struct tty_struct *tty)
+{
+    return 16;
+}
 
-static struct platform_driver cpw_driver = {
-    .probe      = cpw_probe,
-    .remove     = __devexit_p(cpw_remove),
-    .driver     = {
-    .name       = "cpwatcher",
-    .owner      = THIS_MODULE,
-    },
+static int cwc_open(struct tty_struct *tty, struct file *filp)
+{
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+    tty->driver_data = NULL;
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+    if(tty->index > 1) return -ENODEV;
+#else //LGE_FEATURE_CP_HALT_DETECTION
+    if(tty->index > 0) return -ENODEV;
+#endif //LGE_FEATURE_CP_HALT_DETECTION
+    
+    if(tty->index == 0)
+	{
+        if(watcher.open_count > 0) return -ENODEV;
+        down(&watcher_sema);
+        watcher.open_count++;
+        
+        /* save our structure within the tty structure */
+        tty->driver_data = &watcher;
+        watcher.tty = tty;
+    }
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+	else if (tty->index == 1)
+	{
+        if(reporter.open_count > 0) return -ENODEV;
+        down(&reporter_sema);
+        reporter.open_count++;
+        
+        /* save our structure within the tty structure */
+        tty->driver_data = &reporter;
+        reporter.tty = tty;
+    }
+#endif //LGE_FEATURE_CP_HALT_DETECTION
+    
+    if(DEBUG) printk(KERN_INFO "%s returns", __FUNCTION__);
+    
+	return 0;
+    
+}
+
+static void cwc_close(struct tty_struct *tty, struct file *filp)
+{
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+    if((tty == NULL) || (filp == NULL)) return;
+    
+    if((tty->index == 0) && (tty->driver_data == &watcher))
+	{
+        watcher.open_count--;
+        watcher.tty = NULL;
+        up(&watcher_sema);
+    }
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+	else if((tty->index == 1) && (tty->driver_data == &reporter))
+	{
+        reporter.open_count--;
+        reporter.tty = NULL;
+        up(&reporter_sema);
+    }
+#endif //LGE_FEATURE_CP_HALT_DETECTION
+    
+    if(DEBUG) printk(KERN_INFO "%s returns", __FUNCTION__);
+    
+    return;
+}
+
+struct tty_operations cpwatcher_ops = {
+    .open = cwc_open,
+    .close = cwc_close,
+    .write = cwc_write,
+    .write_room = cwc_write_room,
 };
 
-
-static int __init cpw_init(void)
+static int __init cwc_init(void)
 {
-    CPW_DEBUG(" started\n");
-
-     if (platform_device_register(&cp_device)) 
-     {
-     
-        CPW_PRINTK(" fail\n");
-     }  
-
-     return platform_driver_register(&cpw_driver);
-}
-module_init(cpw_init);
+    int result;
     
-         
-static void __exit cpw_exit(void)
-{
-    platform_driver_unregister(&cpw_driver);
-    CPW_DEBUG(" successed\n");
+    if(DEBUG) printk(KERN_INFO "%s: start", __FUNCTION__);
+    
+    cpwatcher_driver = alloc_tty_driver(2);
+    
+    if (!cpwatcher_driver)
+        return -ENOMEM;
+    
+    spin_lock_init(&watcher.lock);
+	watcher.open_count = 0;
+    
+#ifdef LGE_FEATURE_CP_HALT_DETECTION
+    spin_lock_init(&reporter.lock);
+    reporter.open_count = 0;
+#endif //LGE_FEATURE_CP_HALT_DETECTION
+    
+    cpwatcher_driver->owner = THIS_MODULE;
+    cpwatcher_driver->driver_name = "cpwatcher";
+    
+    cpwatcher_driver->name = "cwc";
+    cpwatcher_driver->major = 154;
+    cpwatcher_driver->minor_start = 0;
+    cpwatcher_driver->type = TTY_DRIVER_TYPE_SERIAL;
+    cpwatcher_driver->subtype = SERIAL_TYPE_NORMAL;
+    cpwatcher_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
+    
+    cpwatcher_driver->init_termios = tty_std_termios;
+    cpwatcher_driver->init_termios.c_cflag = B38400 | CS8 | CREAD | HUPCL | CLOCAL;
+    
+    tty_set_operations(cpwatcher_driver, &cpwatcher_ops);
+    
+    result = tty_register_driver(cpwatcher_driver);
+    if (result) {
+        printk(KERN_ERR "failed to register cp watcher driver");
+        put_tty_driver(cpwatcher_driver);
+        return result;
+    }
+    
+    tty_register_device(cpwatcher_driver, 0, NULL);
+    tty_register_device(cpwatcher_driver, 1, NULL);
+    
+    workqueue = create_singlethread_workqueue("cwcrst");
+    
+    if(DEBUG) printk(KERN_INFO "%s: end", __FUNCTION__);
+    
+    return 0;
 }
-module_exit(cpw_exit);
 
+static void __exit cwc_exit(void)
+{
+    if(DEBUG) printk(KERN_INFO "%s", __FUNCTION__);
+    
+    tty_unregister_device(cpwatcher_driver, 0);
+    tty_unregister_device(cpwatcher_driver, 1);
+    
+    tty_unregister_driver(cpwatcher_driver);
+    
+    if (workqueue){
+        flush_workqueue(workqueue);
+        destroy_workqueue(workqueue);
+        workqueue = NULL;
+    }
+}
 
-MODULE_AUTHOR("LG Electronics");
-MODULE_DESCRIPTION("X2 CP Watcher Driver");
-MODULE_LICENSE("GPL");
+module_init(cwc_init);
+module_exit(cwc_exit);
 
-
+MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("CP Watcher");

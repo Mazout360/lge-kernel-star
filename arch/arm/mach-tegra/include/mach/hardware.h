@@ -54,3 +54,11 @@ enum tegra_revision {
 enum tegra_chipid tegra_get_chipid(void);
 enum tegra_revision tegra_get_revision(void);
 #endif
+
+/*
+ * Check if modem connected
+ * return value
+ *   1 : modem connected
+ *   0 : modem is not connected
+ */
+int is_modem_connected(void);

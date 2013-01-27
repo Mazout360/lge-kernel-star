@@ -35,7 +35,8 @@ typedef void	(*callback)(struct spi_device *spi);
  * @func: Callback function
  * Context: can not sleep
  */
-int spi_tegra_register_callback(struct spi_device *spi, callback func);
+int spi_tegra_register_callback(struct spi_device *spi, callback func,
+                                void *client_data);
 
 #if defined(CONFIG_MACH_BSSQ) || defined(CONFIG_MACH_STAR_P999)
 //                                                             

@@ -535,6 +535,12 @@ config BCM4329_RFKILL
 	---help---
 	Adds BCM4329 RFKILL driver for Broadcom BCM4329 chipset
 
+config STAR_MISC
+	bool "Misc driver from startablet"
+	default n
+	---help---
+	MDM functions from the startablet misc driver
+
 #//LGE_CHANGE_S [munho2.lee@lge.com] 2012-02-23 BT Bring-up
 config BRCM_LPM
     bool "BRCM LPM - Low Power Mode"

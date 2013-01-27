@@ -4,6 +4,8 @@
 GCOV_PROFILE := y
 
 ccflags-$(CONFIG_SPI_DEBUG) := -DDEBUG
+EXTRA_CFLAGS += -DLGE_FEATURE_CP_RESET_RECOVERY
+EXTRA_CFLAGS += -DLGE_FEATURE_CP_HALT_DETECTION
 
 # small core, mostly translating board-specific
 # config declarations into driver model code

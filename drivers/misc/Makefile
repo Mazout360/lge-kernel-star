@@ -42,6 +42,7 @@ obj-$(CONFIG_IWMC3200TOP)      += iwmc3200top/
 obj-$(CONFIG_HMC6352)		+= hmc6352.o
 obj-y				+= eeprom/
 obj-y				+= cb710/
+obj-$(CONFIG_STAR_MISC)		+= star_misc.o
 #obj-y				+= muic/
 # sanghyun.hong@lge.com Changes : Mobii, inc. #
 #ifeq ($(CONFIG_LU6500),y)
