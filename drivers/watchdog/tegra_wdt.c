@@ -59,7 +59,11 @@ struct tegra_wdt {
 };
 
 static struct platform_device *tegra_wdt_dev;
-static int heartbeat = 30;
+/*
+ * For spinlock lockup detection to work, the heartbeat should be 2*lockup
+ * for cases where the spinlock disabled irqs.
+ */
+static int heartbeat = 120; /* must be greater than MIN_WDT_PERIOD and lower than MAX_WDT_PERIOD */
 
 #if defined(CONFIG_ARCH_TEGRA_2x_SOC)
 

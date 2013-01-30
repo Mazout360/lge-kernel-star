@@ -409,7 +409,7 @@ void i2c_unlock_adapter(struct i2c_adapter *);
 /* i2c adapter classes (bitmask) */
 #define I2C_CLASS_HWMON		(1<<0)	/* lm_sensors, ... */
 #define I2C_CLASS_DDC		(1<<3)	/* DDC bus on graphics adapters */
-#define I2C_CLASS_SPD		(1<<7)	/* SPD EEPROMs and similar */
+#define I2C_CLASS_SPD		(1<<7)	/* Memory modules */
 
 /* Internal numbers to terminate lists */
 #define I2C_CLIENT_END		0xfffeU
@@ -468,6 +468,19 @@ static inline int i2c_adapter_id(struct i2c_adapter *adap)
 {
 	return adap->nr;
 }
+
+/**
+ * module_i2c_driver() - Helper macro for registering a I2C driver
+ * @__i2c_driver: i2c_driver struct
+ *
+ * Helper macro for I2C drivers which do not do anything special in module
+ * init/exit. This eliminates a lot of boilerplate. Each module may only
+ * use this macro once, and calling it replaces module_init() and module_exit()
+ */
+#define module_i2c_driver(__i2c_driver) \
+	module_driver(__i2c_driver, i2c_add_driver, \
+			i2c_del_driver)
+
 #endif /* I2C */
 #endif /* __KERNEL__ */
 
@@ -588,5 +601,13 @@ union i2c_smbus_data {
 #define I2C_SMBUS_I2C_BLOCK_BROKEN  6
 #define I2C_SMBUS_BLOCK_PROC_CALL   7		/* SMBus 2.0 */
 #define I2C_SMBUS_I2C_BLOCK_DATA    8
+
+//andy.choi@lge.com START
+#define DEVICE_I2C_ADDRESS_SIZE_1BYTE	0
+#define DEVICE_I2C_ADDRESS_SIZE_2BYTE	1
+extern s32 i2c_read_block_data(struct i2c_client *client, u8 addr_flags, u8 len, u16 RegAddr, u8 *RegValues);
+extern s32 i2c_write_block_data(struct i2c_client *client, u8 addr_flags, u8 len, u16 RegAddr, u8 *RegValues);
+
+//andy.choi@lge.com END
 
 #endif /* _LINUX_I2C_H */
