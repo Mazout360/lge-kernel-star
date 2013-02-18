@@ -712,8 +712,8 @@ static int mdm_spi_probe(struct spi_device *spi)
 #endif
     
 	//config srdy,mrdy gpio value according to hw revision
-		SPI1_SRDY = TEGRA_GPIO_PJ6;
-		SPI1_MRDY = TEGRA_GPIO_PU6;     //TEGRA_GPIO_PS1;
+		SPI1_SRDY = TEGRA_GPIO_PU6;
+		SPI1_MRDY = TEGRA_GPIO_PJ6;     //TEGRA_GPIO_PS1;
 		SPI2_SRDY = TEGRA_GPIO_PO5;     //TEGRA_GPIO_PO5;
 		SPI2_MRDY = TEGRA_GPIO_PO0;
 	
