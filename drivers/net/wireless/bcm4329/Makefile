@@ -97,3 +97,7 @@ endif
 ifeq ($(CONFIG_BRCM_USE_STATIC_BUF),y)
 EXTRA_CFLAGS += -DDHD_USE_STATIC_BUF
 endif
+
+ifeq ($(CONFIG_UBUNTU_INJECTION),y)
+EXTRA_CFLAGS += -fno-pic
+endif
