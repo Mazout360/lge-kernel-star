@@ -79,7 +79,7 @@ static int SPI2_MRDY;
 #define GPIO_IFX_RESET_1V8_N  TEGRA_GPIO_PV0
 #define GPIO_IFX_PWRON_1V8    TEGRA_GPIO_PV1
 
-//#define TTYSPI_DEBUG
+#define TTYSPI_DEBUG
 #ifdef TTYSPI_DEBUG
 #define TTYSPI_DEBUG_PRINT(format, args ...) printk(KERN_INFO format, ## args)
 #else

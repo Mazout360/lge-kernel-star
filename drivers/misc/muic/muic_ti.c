@@ -49,7 +49,7 @@
 #include <linux/lge_hw_rev.h>
 
 
-#define GPIO_CP_USB_VBUS_EN             TEGRA_GPIO_PF1  // MDM_USB_VBUS_EN
+#define GPIO_CP_USB_VBUS_EN             TEGRA_GPIO_PR7  // MDM_USB_VBUS_EN
 #define GPIO_CP_UART_SW                 TEGRA_GPIO_PU2 // UART_SW
 
 /* 

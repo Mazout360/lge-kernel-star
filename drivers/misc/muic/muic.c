@@ -94,7 +94,7 @@ extern int muic_boot_path;
 #define GPIO_CP_UART_SW         TEGRA_GPIO_PU2 // UART_SW
 
 //MDM_USB_VBUS_EN
-#define GPIO_CP_USB_VBUS_EN     TEGRA_GPIO_PF1  // MDM_USB_VBUS_EN
+#define GPIO_CP_USB_VBUS_EN     TEGRA_GPIO_PR7  // MDM_USB_VBUS_EN
 #if defined(CONFIG_LU6500)
 unsigned int muic_intr_gpio = TEGRA_GPIO_PU0; 
 #else
