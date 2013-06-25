@@ -75,7 +75,6 @@ void star_setup_reboot(void) {}
 //                                                            
 
 static struct platform_device *star_uart_devices[] __initdata = {
-	&tegra_uarta_device,
 	&tegra_uartb_device,
 	&tegra_uartc_device,
 //                                                  
@@ -94,70 +93,63 @@ static struct tegra_uart_platform_data star_uart_pdata;
 static void __init uart_debug_init(void)
 {
 	unsigned long rate;
-	struct clk *debug_uart_clk;
 	struct clk *c;
-	int modem_id = tegra_get_modem_id();
-
+    
 	/* UARTB is the debug port. */
 	pr_info("Selecting UARTB as the debug console\n");
-	star_uart_devices[1] = &debug_uartb_device;
+	star_uart_devices[0] = &debug_uartd_device;
 	debug_uart_port_base = ((struct plat_serial8250_port *)(
-		debug_uartb_device.dev.platform_data))->mapbase;
+                                                            debug_uartb_device.dev.platform_data))->mapbase;
 	debug_uart_clk = clk_get_sys("serial8250.0", "uartb");
-
+    
 	/* Clock enable for the debug channel */
 	if (!IS_ERR_OR_NULL(debug_uart_clk)) {
 		rate = ((struct plat_serial8250_port *)(
-		debug_uartb_device.dev.platform_data))->uartclk;
+                                                debug_uartb_device.dev.platform_data))->uartclk;
 		pr_info("The debug console clock name is %s\n",
-				debug_uart_clk->name);
+                debug_uart_clk->name);
 		c = tegra_get_clock_by_name("pll_p");
 		if (IS_ERR_OR_NULL(c))
 			pr_err("Not getting the parent clock pll_p\n");
 		else
 			clk_set_parent(debug_uart_clk, c);
-
+        
 		clk_enable(debug_uart_clk);
 		clk_set_rate(debug_uart_clk, rate);
 	} else {
 		pr_err("Not getting the clock %s for debug console\n",
-				debug_uart_clk->name);
+               debug_uart_clk->name);
 	}
 }
 
 static void __init star_uart_init(void)
 {
-	int i;
-	struct clk *c;
-
-	for (i = 0; i < ARRAY_SIZE(uart_parent_clk); ++i) {
-		c = tegra_get_clock_by_name(uart_parent_clk[i].name);
-		if (IS_ERR_OR_NULL(c)) {
-			pr_err("Not able to get the clock for %s\n",
-					uart_parent_clk[i].name);
-			continue;
-		}
-		uart_parent_clk[i].parent_clk = c;
-		uart_parent_clk[i].fixed_clk_rate = clk_get_rate(c);
-	}
-	star_uart_pdata.parent_clk_list = uart_parent_clk;
-	star_uart_pdata.parent_clk_count = ARRAY_SIZE(uart_parent_clk);
-
-	tegra_uarta_device.dev.platform_data = &star_uart_pdata;
-	tegra_uartb_device.dev.platform_data = &star_uart_pdata;
-	tegra_uartc_device.dev.platform_data = &star_uart_pdata;
-//                                                  
-	tegra_uartd_device.dev.platform_data = &star_uart_pdata;
-//                                                  
-
-	/* Register low speed only if it is selected */
-	if (!is_tegra_debug_uartport_hs())
-		uart_debug_init();
-
-	platform_add_devices(star_uart_devices,
-			ARRAY_SIZE(star_uart_devices));
+    int i;
+    struct clk *c;
+    
+    for (i = 0; i < ARRAY_SIZE(uart_parent_clk); ++i) {
+        c = tegra_get_clock_by_name(uart_parent_clk[i].name);
+        if (IS_ERR_OR_NULL(c)) {
+            pr_err("Not able to get the clock for %s\n",
+                    uart_parent_clk[i].name);
+            continue;
+        }
+        uart_parent_clk[i].parent_clk = c;
+        uart_parent_clk[i].fixed_clk_rate = clk_get_rate(c);
+    }
+    star_uart_pdata.parent_clk_list = uart_parent_clk;
+    star_uart_pdata.parent_clk_count = ARRAY_SIZE(uart_parent_clk);
+    tegra_uartb_device.dev.platform_data = &star_uart_pdata;
+    tegra_uartc_device.dev.platform_data = &star_uart_pdata;
+    
+    /* Register low speed only if it is selected */
+    if (!is_tegra_debug_uartport_hs() &&
+        (strstr(boot_command_line, "ttyS0") != NULL))
+        uart_debug_init();
+    
+        platform_add_devices(star_uart_devices,
+                    ARRAY_SIZE(star_uart_devices));
 }
-
 
 	/* name		parent		rate		enabled */
 static __initdata struct tegra_clk_init_table star_clk_init_table[] = {
@@ -379,7 +371,7 @@ static struct tegra_spi_platform_data star_spi_pdata = {
 	.is_dma_based		= true,
 	.max_dma_buffer		= (16 * 1024),
 	.is_clkon_always	= false,
-	.max_rate		= 48000000,
+	.max_rate		= 24000000,
 };
 
 static void __init star_spi_init(void)
