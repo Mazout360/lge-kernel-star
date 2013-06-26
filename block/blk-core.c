@@ -309,7 +309,8 @@ void __blk_run_queue(struct request_queue *q)
         q->notified_urgent = true;
         q->urgent_request_fn(q);
     } else
-        q->request_fn(q);}
+        q->request_fn(q);
+}
 EXPORT_SYMBOL(__blk_run_queue);
 
 /**
@@ -2800,7 +2801,7 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 
 void blk_finish_plug(struct blk_plug *plug)
 {
-	blk_flush_plug_list(plug, false);
+	blk_flush_plug_list(plug , false);
 
 	if (plug == current->plug)
 		current->plug = NULL;
